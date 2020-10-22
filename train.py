@@ -20,6 +20,7 @@ from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 from logging import warning
 
 from readers import READERS, get_reader
+from common import timed
 
 
 # Parameter defaults
@@ -95,9 +96,12 @@ def get_optimizer(num_train_examples, options):
 
 def build_classifier(pretrained_model, num_labels, optimizer, options):
     seq_len = options.seq_len
-    input_ids = Input(shape=(seq_len,), dtype='int32')
-    token_type_ids = Input(shape=(seq_len,), dtype='int32')
-    attention_mask = Input(shape=(seq_len,), dtype='int32')
+    input_ids = Input(
+        shape=(seq_len,), dtype='int32', name='input_ids')
+    token_type_ids = Input(
+        shape=(seq_len,), dtype='int32', name='token_type_ids')
+    attention_mask = Input(
+        shape=(seq_len,), dtype='int32', name='attention_mask')
 
     pretrained_outputs = pretrained_model([
         input_ids,
@@ -134,6 +138,7 @@ def build_classifier(pretrained_model, num_labels, optimizer, options):
     return model
 
 
+@timed
 def load_data(fn, options):
     read = get_reader(options.input_format)
     texts, labels = [], []
@@ -145,28 +150,36 @@ def load_data(fn, options):
                 raise ValueError(f'multiple labels on line {ln} in {fn}: {l}')
             texts.append(text)
             labels.append(text_labels)
+    print(f'loaded {len(texts)} examples from {fn}', file=sys.stderr)
     return texts, labels
 
 
 def make_tokenization_function(tokenizer, options):
     seq_len = options.seq_len
     def tokenize(text):
-        return tokenizer(
+        tokenized = tokenizer(
             text,
             max_length=seq_len,
             truncation=True,
             padding=True,
             return_tensors='np'
         )
+        # Return dict b/c Keras (2.3.0-tf) DataAdapter doesn't apply
+        # dict mapping to transformer.BatchEncoding inputs
+        return {
+            'input_ids': tokenized['input_ids'],
+            'token_type_ids': tokenized['token_type_ids'],
+            'attention_mask': tokenized['attention_mask'],
+        }
     return tokenize
 
 
-def inputs(tokenizer_output):
-    return [
-        tokenizer_output['input_ids'],
-        tokenizer_output['attention_mask'],
-        tokenizer_output['token_type_ids']
-    ]
+@timed
+def prepare_classifier(num_train_examples, num_labels, options):
+    pretrained_model, tokenizer, config = load_pretrained(options)
+    optimizer = get_optimizer(num_train_examples, options)
+    model = build_classifier(pretrained_model, num_labels, optimizer, options)
+    return model, tokenizer, optimizer
 
 
 def main(argv):
@@ -174,6 +187,7 @@ def main(argv):
 
     train_texts, train_labels = load_data(options.train, options)
     dev_texts, dev_labels = load_data(options.dev, options)
+    num_train_examples = len(train_texts)
     
     label_encoder = MultiLabelBinarizer()
     label_encoder.fit(train_labels)
@@ -181,20 +195,22 @@ def main(argv):
     dev_Y = label_encoder.transform(dev_labels)
     num_labels = len(label_encoder.classes_)
 
-    pretrained_model, tokenizer, config = load_pretrained(options)
-    optimizer = get_optimizer(len(train_texts), options)
-    model = build_classifier(pretrained_model, num_labels, optimizer, options)
+    classifier, tokenizer, optimizer = prepare_classifier(
+        num_train_examples,
+        num_labels,
+        options
+    )
 
     tokenize = make_tokenization_function(tokenizer, options)
     train_X = tokenize(train_texts)
     dev_X = tokenize(dev_texts)
 
-    history = model.fit(
-        inputs(train_X),
+    history = classifier.fit(
+        train_X,
         train_Y,
         epochs=options.epochs,
         batch_size=options.batch_size,
-        validation_data=(inputs(dev_X), dev_Y),
+        validation_data=(dev_X, dev_Y),
     )
 
     return 0
