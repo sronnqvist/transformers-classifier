@@ -26,21 +26,39 @@ def parse_fasttext_line(l, label_string='__label__'):
 
     # The rest is the text
     text = ''.join(split[idx:])
-    return labels, text
+    return text, labels
+
+
+def parse_tsv_line(l):
+    fields = l.split('\t')
+    labels, text = fields
+    labels = labels.split()
+    return text, labels
 
 
 def read_fasttext(f, fn, label_string='__label__'):
     for ln, l in enumerate(f, start=1):
         l = l.rstrip('\n')
         try:
-            labels, text = parse_fasttext_line(l, label_string)
+            text, labels = parse_fasttext_line(l, label_string)
+        except Exception as e:
+            raise ValueError(f'failed to parse {fn} line {ln}: {e}: {l}')
+        yield text, labels
+
+
+def read_tsv(f, fn):
+    for ln, l in enumerate(f, start=1):
+        l = l.rstrip('\n')
+        try:
+            text, labels = parse_tsv_line(l)
         except Exception as e:
             raise ValueError(f'failed to parse {fn} line {ln}: {e}: {l}')
         yield text, labels
 
 
 READERS = OrderedDict([
-    ('fasttext', read_fasttext)
+    ('tsv', read_tsv),
+    ('fasttext', read_fasttext),
 ])
 
 
