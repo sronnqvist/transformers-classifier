@@ -13,6 +13,8 @@ from transformers import AutoConfig, AutoTokenizer, TFAutoModel
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 from logging import warning
 
+from readers import READERS, get_reader
+
 
 # Parameter defaults
 DEFAULT_BATCH_SIZE = 8
@@ -38,6 +40,9 @@ def argparser():
     ap.add_argument('--seq_len', metavar='INT', type=int,
                     default=DEFAULT_SEQ_LEN,
                     help='maximum input sequence length')
+    ap.add_argument('--input_format', choices=READERS.keys(),
+                    default=list(READERS.keys())[0],
+                    help='input file format')
     return ap
 
 
@@ -90,20 +95,17 @@ def build_classifier(pretrained_model, num_labels, optimizer, options):
     return model
 
 
-def load_fasttext_data(fn):
-    """Load FastText format with exactly one label per line."""
+def load_data(fn, options):
+    read = get_reader(options.input_format)
     texts, labels = [], []
     with open(fn) as f:
-        for ln, l in enumerate(f, start=1):
-            l = l.rstrip('\n')
-            label, text = l.split(None, 1)
-            if not label.startswith('__label__'):
+        for ln, (text, text_labels) in enumerate(read(f, fn), start=1):
+            if not text_labels:
                 raise ValueError(f'missing label on line {ln} in {fn}: {l}')
-            label = label[len('__label__'):]
-            if '__label__' in text:
+            if len(text_labels) > 1:
                 warning(f'multiple labels on line {ln} in {fn}: {l}')
             texts.append(text)
-            labels.append(label)
+            labels.append(text_labels[0])
     return texts, labels
 
 
@@ -131,8 +133,8 @@ def inputs(tokenizer_output):
 def main(argv):
     options = argparser().parse_args(argv[1:])
 
-    train_texts, train_labels = load_fasttext_data(options.train)
-    dev_texts, dev_labels = load_fasttext_data(options.dev)
+    train_texts, train_labels = load_data(options.train, options)
+    dev_texts, dev_labels = load_data(options.dev, options)
     
     label_encoder = LabelEncoder()
     train_Y = label_encoder.fit_transform(train_labels)
