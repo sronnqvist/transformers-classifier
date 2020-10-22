@@ -1,6 +1,9 @@
+# Readers for labeled text formats
+
 import re
 
 from collections import OrderedDict
+
 
 SPLIT_KEEP_WHITESPACE_RE = re.compile(r'(\s+)')
 
@@ -17,7 +20,7 @@ def parse_fasttext_line(l, label_string='__label__'):
     while idx < len(split) and split[idx].startswith(label_string):
         labels.append(split[idx][len(label_string):])
         idx += 1
-        # Skip whitespace and empties
+        # Skip whitespace and empties after label
         while idx < len(split) and split[idx].isspace() or not split[idx]:
             idx += 1
 

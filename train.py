@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 
 import sys
+import math
 
 from sklearn.preprocessing import LabelEncoder
 
 from tensorflow.keras import Model
 from tensorflow.keras.layers import Input, Dropout, Dense
 from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.losses import CategoricalCrossentropy
+from tensorflow.keras.metrics import CategoricalAccuracy
+from tensorflow.keras.utils import to_categorical
 
 from transformers import AutoConfig, AutoTokenizer, TFAutoModel
+from transformers.optimization_tf import create_optimizer
 
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 from logging import warning
@@ -20,6 +25,7 @@ from readers import READERS, get_reader
 DEFAULT_BATCH_SIZE = 8
 DEFAULT_SEQ_LEN = 128
 DEFAULT_LR = 5e-5
+DEFAULT_WARMUP_PROPORTION = 0.1
 
 
 def argparser():
@@ -40,6 +46,9 @@ def argparser():
     ap.add_argument('--seq_len', metavar='INT', type=int,
                     default=DEFAULT_SEQ_LEN,
                     help='maximum input sequence length')
+    ap.add_argument('--warmup_proportion', metavar='FLOAT', type=float,
+                    default=DEFAULT_WARMUP_PROPORTION,
+                    help='warmup proportion of training steps')
     ap.add_argument('--input_format', choices=READERS.keys(),
                     default=list(READERS.keys())[0],
                     help='input file format')
@@ -61,8 +70,24 @@ def load_pretrained(options):
     return model, tokenizer, config
 
 
-def get_optimizer(options):
-    return Adam(lr=options.lr)
+def get_optimizer(num_train_examples, options):
+    steps_per_epoch = math.ceil(num_train_examples / options.batch_size)
+    num_train_steps = steps_per_epoch * options.epochs
+    num_warmup_steps = math.floor(num_train_steps * options.warmup_proportion)
+
+    # Mostly defaults from transformers.optimization_tf
+    optimizer, lr_scheduler = create_optimizer(
+        options.lr,
+        num_train_steps=num_train_steps,
+        num_warmup_steps=num_warmup_steps,
+        min_lr_ratio=0.0,
+        adam_beta1=0.9,
+        adam_beta2=0.999,
+        adam_epsilon=1e-8,
+        weight_decay_rate=0.01,
+        power=1.0,
+    )
+    return optimizer
 
 
 def build_classifier(pretrained_model, num_labels, optimizer, options):
@@ -79,7 +104,7 @@ def build_classifier(pretrained_model, num_labels, optimizer, options):
     pooled_output = pretrained_outputs[1]
 
     # TODO consider Dropout here
-    output_probs = Dense(num_labels, activation='softmax')(pooled_output)
+    output_probs = Dense(num_labels)(pooled_output)
 
     model = Model(
         inputs=[input_ids, attention_mask, token_type_ids],
@@ -88,8 +113,8 @@ def build_classifier(pretrained_model, num_labels, optimizer, options):
 
     model.compile(
         optimizer=optimizer,
-        loss='sparse_categorical_crossentropy',
-        metrics=['sparse_categorical_accuracy']
+        loss=CategoricalCrossentropy(from_logits=True),
+        metrics=[CategoricalAccuracy(name='acc')]
     )
 
     return model
@@ -130,6 +155,14 @@ def inputs(tokenizer_output):
     ]
 
 
+def encode_labels(labels, label_encoder, one_hot=True):
+    Y = label_encoder.transform(labels)
+    if not one_hot:
+        return Y
+    else:
+        return to_categorical(Y, num_classes=len(label_encoder.classes_))
+
+
 def main(argv):
     options = argparser().parse_args(argv[1:])
 
@@ -137,24 +170,25 @@ def main(argv):
     dev_texts, dev_labels = load_data(options.dev, options)
     
     label_encoder = LabelEncoder()
-    train_Y = label_encoder.fit_transform(train_labels)
-    dev_Y = label_encoder.transform(dev_labels)
+    label_encoder.fit(train_labels)
     num_labels = len(label_encoder.classes_)
+    train_Y = encode_labels(train_labels, label_encoder)
+    dev_Y = encode_labels(dev_labels, label_encoder)
 
     pretrained_model, tokenizer, config = load_pretrained(options)
-    optimizer = get_optimizer(options)
+    optimizer = get_optimizer(len(train_texts), options)
     model = build_classifier(pretrained_model, num_labels, optimizer, options)
 
     tokenize = make_tokenization_function(tokenizer, options)
     train_X = tokenize(train_texts)
     dev_X = tokenize(dev_texts)
 
-    model.fit(
+    history = model.fit(
         inputs(train_X),
         train_Y,
         epochs=options.epochs,
         batch_size=options.batch_size,
-        validation_data=(inputs(dev_X), dev_Y)
+        validation_data=(inputs(dev_X), dev_Y),
     )
 
     return 0
