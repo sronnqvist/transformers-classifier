@@ -3,14 +3,15 @@
 import sys
 import math
 
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import MultiLabelBinarizer
 
 from tensorflow.keras import Model
 from tensorflow.keras.layers import Input, Dropout, Dense
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.losses import CategoricalCrossentropy
-from tensorflow.keras.metrics import CategoricalAccuracy
-from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.losses import CategoricalCrossentropy, BinaryCrossentropy
+from tensorflow.keras.metrics import CategoricalAccuracy, AUC
+
+from tensorflow_addons.metrics import F1Score
 
 from transformers import AutoConfig, AutoTokenizer, TFAutoModel
 from transformers.optimization_tf import create_optimizer
@@ -52,6 +53,8 @@ def argparser():
     ap.add_argument('--input_format', choices=READERS.keys(),
                     default=list(READERS.keys())[0],
                     help='input file format')
+    ap.add_argument('--multiclass', default=False, action='store_true',
+                    help='task has exactly one label per text')
     return ap
 
 
@@ -104,17 +107,28 @@ def build_classifier(pretrained_model, num_labels, optimizer, options):
     pooled_output = pretrained_outputs[1]
 
     # TODO consider Dropout here
-    output_probs = Dense(num_labels)(pooled_output)
-
+    if options.multiclass:
+        output = Dense(num_labels, activation='softmax')(pooled_output)
+        loss = CategoricalCrossentropy()
+        metrics = [CategoricalAccuracy(name='acc')]
+    else:
+        output = Dense(num_labels, activation='sigmoid')(pooled_output)
+        loss = BinaryCrossentropy()
+        metrics = [
+            F1Score(name='f1', num_classes=num_labels, average='micro',
+                    threshold=0.5),
+            AUC(name='auc', multi_label=True)
+        ]
+        
     model = Model(
         inputs=[input_ids, attention_mask, token_type_ids],
-        outputs=[output_probs]
+        outputs=[output]
     )
 
     model.compile(
         optimizer=optimizer,
-        loss=CategoricalCrossentropy(from_logits=True),
-        metrics=[CategoricalAccuracy(name='acc')]
+        loss=loss,
+        metrics=metrics
     )
 
     return model
@@ -125,12 +139,12 @@ def load_data(fn, options):
     texts, labels = [], []
     with open(fn) as f:
         for ln, (text, text_labels) in enumerate(read(f, fn), start=1):
-            if not text_labels:
+            if options.multiclass and not text_labels:
                 raise ValueError(f'missing label on line {ln} in {fn}: {l}')
-            if len(text_labels) > 1:
-                warning(f'multiple labels on line {ln} in {fn}: {l}')
+            elif options.multiclass and len(text_labels) > 1:
+                raise ValueError(f'multiple labels on line {ln} in {fn}: {l}')
             texts.append(text)
-            labels.append(text_labels[0])
+            labels.append(text_labels)
     return texts, labels
 
 
@@ -155,25 +169,17 @@ def inputs(tokenizer_output):
     ]
 
 
-def encode_labels(labels, label_encoder, one_hot=True):
-    Y = label_encoder.transform(labels)
-    if not one_hot:
-        return Y
-    else:
-        return to_categorical(Y, num_classes=len(label_encoder.classes_))
-
-
 def main(argv):
     options = argparser().parse_args(argv[1:])
 
     train_texts, train_labels = load_data(options.train, options)
     dev_texts, dev_labels = load_data(options.dev, options)
     
-    label_encoder = LabelEncoder()
+    label_encoder = MultiLabelBinarizer()
     label_encoder.fit(train_labels)
+    train_Y = label_encoder.transform(train_labels)
+    dev_Y = label_encoder.transform(dev_labels)
     num_labels = len(label_encoder.classes_)
-    train_Y = encode_labels(train_labels, label_encoder)
-    dev_Y = encode_labels(dev_labels, label_encoder)
 
     pretrained_model, tokenizer, config = load_pretrained(options)
     optimizer = get_optimizer(len(train_texts), options)
