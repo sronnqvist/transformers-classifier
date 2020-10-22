@@ -1,0 +1,9 @@
+To run on the CSC puhti GPU partition, set up a python virtual
+environment as follows:
+
+    module purge
+    module load tensorflow/2.2-hvd
+    python -m venv transformers3.4
+    source transformers3.4/bin/activate
+    python -m pip install -r requirements.txt
+
