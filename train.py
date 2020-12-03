@@ -8,7 +8,7 @@ import csv
 
 from scipy.sparse import lil_matrix
 
-from sklearn.metrics import precision_recall_fscore_support
+from sklearn.metrics import precision_recall_fscore_support, roc_auc_score
 from sklearn.preprocessing import MultiLabelBinarizer
 
 from tensorflow.keras import Model
@@ -16,7 +16,8 @@ from tensorflow.keras.layers import Input, Dropout, Dense
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import CategoricalCrossentropy, BinaryCrossentropy
 from tensorflow.keras.metrics import CategoricalAccuracy, AUC
-from tensorflow.keras.callbacks import Callback
+from tensorflow.keras.callbacks import Callback, ModelCheckpoint
+from tensorflow.config import experimental as tfconf_exp
 
 from tensorflow_addons.metrics import F1Score
 
@@ -37,6 +38,16 @@ DEFAULT_LR = 5e-5
 DEFAULT_WARMUP_PROPORTION = 0.1
 
 
+def init_tf_memory():
+    gpus = tfconf_exp.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tfconf_exp.set_memory_growth(gpu, True)
+        except RuntimeError as e:
+            print(e)
+
+
 def argparser():
     ap = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
     ap.add_argument('--model_name', default=None,
@@ -45,6 +56,8 @@ def argparser():
                     help='training data')
     ap.add_argument('--dev', metavar='FILE', required=True,
                     help='development data')
+    ap.add_argument('--test', metavar='FILE', required=False,
+                    help='test data', default=None)
     ap.add_argument('--batch_size', metavar='INT', type=int,
                     default=DEFAULT_BATCH_SIZE,
                     help='batch size for training')
@@ -65,8 +78,14 @@ def argparser():
                     help='task has exactly one label per text')
     ap.add_argument('--output_file', default=None, metavar='FILE',
                     help='save model to file')
+    ap.add_argument('--save_predictions', default=False, action='store_true',
+                    help='save predictions and labels for dev set, or for test set if provided')
+    ap.add_argument('--load_model', default=None, metavar='FILE',
+                    help='load model from file')
     ap.add_argument('--log_file', default="train.log", metavar='FILE',
                     help='log parameters and performance to file')
+    ap.add_argument('--test_log_file', default="test.log", metavar='FILE',
+                    help='log parameters and performance on test set to file')
     return ap
 
 
@@ -152,7 +171,7 @@ def build_classifier(pretrained_model, num_labels, optimizer, options):
 
 
 @timed
-def load_data(fn, options):
+def load_data(fn, options, max_chars=None):
     read = get_reader(options.input_format)
     texts, labels = [], []
     with open(fn) as f:
@@ -161,7 +180,7 @@ def load_data(fn, options):
                 raise ValueError(f'missing label on line {ln} in {fn}: {l}')
             elif options.multiclass and len(text_labels) > 1:
                 raise ValueError(f'multiple labels on line {ln} in {fn}: {l}')
-            texts.append(text)
+            texts.append(text[:max_chars])
             labels.append(text_labels)
     print(f'loaded {len(texts)} examples from {fn}', file=sys.stderr)
     return texts, labels
@@ -196,11 +215,11 @@ def prepare_classifier(num_train_examples, num_labels, options):
     return model, tokenizer, optimizer
 
 
-def optimize_threshold(model, train_X, train_Y, test_X, test_Y, epoch=None):
-    labels_prob = model.predict(train_X, verbose=1)
+def optimize_threshold(model, train_X, train_Y, test_X, test_Y, options=None, epoch=None, save_pred=None):
+    labels_prob = model.predict(train_X, verbose=1)#, batch_size=options.batch_size)
 
     best_f1 = 0.
-    print("Optimizing threshold...\nThres.\tF1\tPrec.\tRecall")
+    print("Optimizing threshold...\nThres.\tPrec.\tRecall\tF1")
     for threshold in np.arange(0.1, 0.9, 0.05):
         labels_pred = lil_matrix(labels_prob.shape, dtype='b')
         labels_pred[labels_prob>=threshold] = 1
@@ -217,7 +236,7 @@ def optimize_threshold(model, train_X, train_Y, test_X, test_Y, epoch=None):
     #print("Current F_max:", best_f1, "epoch", best_f1_epoch+1, "threshold", best_f1_threshold, '\n')
     #print("Current F_max:", best_f1, "threshold", best_f1_threshold, '\n')
 
-    test_labels_prob = model.predict(test_X, verbose=1)
+    test_labels_prob = model.predict(test_X, verbose=1)#, batch_size=options.batch_size)
     test_labels_pred = lil_matrix(test_labels_prob.shape, dtype='b')
     test_labels_pred[test_labels_prob>=best_f1_threshold] = 1
     test_precision, test_recall, test_f1, _ = precision_recall_fscore_support(test_Y, test_labels_pred, average="micro")
@@ -226,7 +245,34 @@ def optimize_threshold(model, train_X, train_Y, test_X, test_Y, epoch=None):
     else:
         epoch_str = ""
     print("\nValidation/Test performance at threshold %.2f%s: Prec. %.4f, Recall %.4f, F1 %.4f" % (best_f1_threshold, epoch_str, test_precision, test_recall, test_f1))
-    return test_f1
+
+    if save_pred is not None:
+        if epoch is None:
+            epoch = 'X'
+        print("Saving predictions to", save_pred+"-epoch%d.*.npy" % epoch)
+        np.save(save_pred+"-epoch%d.preds.npy" % epoch, test_labels_pred.toarray())
+        np.save(save_pred+"-epoch%d.gold.npy" % epoch, test_Y)
+        np.save(save_pred+"-epoch%d.class_labels.npy" % epoch, label_encoder.classes_)
+
+    return test_f1, best_f1_threshold, test_labels_pred
+
+
+def test_threshold(model, test_X, test_Y, options, threshold=0.4, options=None, epoch=None):
+    test_labels_prob = model.predict(test_X, verbose=1)#, batch_size=options.batch_size)
+    test_labels_pred = lil_matrix(test_labels_prob.shape, dtype='b')
+    test_labels_pred[test_labels_prob>=threshold] = 1
+    test_precision, test_recall, test_f1, _ = precision_recall_fscore_support(test_Y, test_labels_pred, average="micro")
+    if epoch:
+        epoch_str = ", epoch %d" % epoch
+    else:
+        epoch_str = ""
+    print("\nValidation/Test performance at threshold %.2f%s: Prec. %.4f, Recall %.4f, F1 %.4f" % (threshold, epoch_str, test_precision, test_recall, test_f1))
+    return test_f1, threshold, test_labels_pred
+
+
+def test_auc(model, test_X, test_Y):
+    labels_prob = model.predict(test_X, verbose=1)
+    return roc_auc_score(test_Y, labels_prob, average = 'micro')
 
 
 class Logger:
@@ -246,34 +292,60 @@ class Logger:
         with open(self.filename, 'a') as csvfile:
             writer = csv.DictWriter(csvfile, sorted(self.log.keys()))
             if not file_exists:
+                print("Creating log file", self.filename, flush=True)
                 writer.writeheader()
             writer.writerow(self.log)
 
 
 class EvalCallback(Callback):
-    def __init__(self, model, train_X, train_Y, test_X, test_Y, logfile="train.log", params={}):
+    def __init__(self, model, train_X, train_Y, dev_X, dev_Y, test_X=None, test_Y=None, logfile="train.log", test_logfile=None, save_pred=None, params={}):
         self.model = model
         self.train_X = train_X
         self.train_Y = train_Y
+        self.dev_X = dev_X
+        self.dev_Y = dev_Y
         self.test_X = test_X
         self.test_Y = test_Y
         self.logger = Logger(logfile, self.model, params)
+        if test_logfile is not None:
+            print("Setting up test set logging to", test_logfile, flush=True)
+            self.test_logger = Logger(test_logfile, self.model, params)
+        if save_pred is not None:
+            self.save_pred = save_pred
+        else:
+            self.save_pred = None
     def on_epoch_end(self, epoch, logs={}):
-        logs['f1'] = optimize_threshold(self.model, self.train_X, self.train_Y, self.test_X, self.test_Y, epoch=epoch)
+        print("Validation set performance:")
+        logs['f1'], _, _ = optimize_threshold(self.model, self.train_X, self.train_Y, self.dev_X, self.dev_Y, epoch=epoch)
+        logs['rocauc'] = test_auc(classifier, self.dev_X, self.dev_Y)
+        print("AUC dev:", logs['rocauc'])
+
         self.logger.record(epoch, logs)
+        if self.test_X is not None:
+            print("Test set performance:")
+            test_f1, _, _ = optimize_threshold(self.model, self.train_X, self.train_Y, self.test_X, self.test_Y, epoch=epoch, save_pred=self.save_pred)
+            auc = test_auc(classifier, self.test_X, self.test_Y)
+            print("AUC test:", auc)
+            self.test_logger.record(epoch, {'f1': test_f1, 'rocauc': auc})
 
 
 def main(argv):
+    init_tf_memory()
     options = argparser().parse_args(argv[1:])
 
-    train_texts, train_labels = load_data(options.train, options)
-    dev_texts, dev_labels = load_data(options.dev, options)
+    train_texts, train_labels = load_data(options.train, options, max_chars=25000)
+    dev_texts, dev_labels = load_data(options.dev, options, max_chars=25000)
+    if options.test is not None:
+        test_texts, test_labels = load_data(options.test, options, max_chars=25000)
     num_train_examples = len(train_texts)
 
     label_encoder = MultiLabelBinarizer()
     label_encoder.fit(train_labels)
     train_Y = label_encoder.transform(train_labels)
     dev_Y = label_encoder.transform(dev_labels)
+    if options.test is not None:
+        test_Y = label_encoder.transform(test_labels)
+
     num_labels = len(label_encoder.classes_)
 
     classifier, tokenizer, optimizer = prepare_classifier(
@@ -285,20 +357,57 @@ def main(argv):
     tokenize = make_tokenization_function(tokenizer, options)
     train_X = tokenize(train_texts)
     dev_X = tokenize(dev_texts)
+    if options.test is not None:
+        test_X = tokenize(test_texts)
 
-    eval_callback = EvalCallback(classifier, train_X, train_Y, dev_X, dev_Y,
+    if options.load_model is not None:
+        classifier.load_weights(options.load_model)
+
+        print("Evaluating on dev set...")
+        f1, th, dev_pred = optimize_threshold(classifier, train_X, train_Y, dev_X, dev_Y, options)
+        print("AUC dev:", test_auc(classifier, dev_X, dev_Y))
+
+        if options.test is not None:
+            print("Evaluating on test set...")
+            #test_f1, test_th, test_pred = optimize_threshold(classifier, train_X, train_Y, test_X, test_Y, options, save_pred=options.output_file)
+            test_f1, test_th, test_pred = optimize_threshold(classifier, train_X, train_Y, test_X, test_Y, options)
+            print("AUC test:", test_auc(classifier, test_X, test_Y))
+
+            if options.save_predictions:
+                np.save(options.load_model+".preds.npy", test_pred.toarray())
+                np.save(options.load_model+".gold.npy", test_Y)
+                np.save(options.load_model+".class_labels.npy", label_encoder.classes_)
+        elif options.save_predictions:
+            np.save(options.load_model+".preds.npy", dev_pred.toarray())
+            np.save(options.load_model+".gold.npy", dev_Y)
+            np.save(options.load_model+".class_labels.npy", label_encoder.classes_)
+        #f1, th, dev_pred = test_threshold(classifier, dev_X, dev_Y, threshold=0.4)
+
+        return
+
+
+    callbacks = [] #[ModelCheckpoint(options.output_file+'.{epoch:02d}', save_weights_only=True)]
+    if options.test is not None and options.test_log_file is not None:
+        print("Initializing evaluation with dev and test set...")
+        callbacks.append(EvalCallback(classifier, train_X, train_Y, dev_X, dev_Y, test_X=test_X, test_Y=test_Y,
                                     logfile=options.log_file,
-                                    params={'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size})
+                                    test_logfile=options.test_log_file,
+                                    save_pred=options.output_file,
+                                    params={'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size}))
+    else:
+        print("Initializing evaluation with dev set...")
+        callbacks.append(EvalCallback(classifier, train_X, train_Y, dev_X, dev_Y,
+                                    logfile=options.log_file,
+                                    params={'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size}))
+
     history = classifier.fit(
         train_X,
         train_Y,
         epochs=options.epochs,
         batch_size=options.batch_size,
         validation_data=(dev_X, dev_Y),
-        callbacks=[eval_callback]
+        callbacks=callbacks
     )
-    #print(classifier.predict(dev_X))
-    #optimize_threshold(classifier, train_X, train_Y, dev_X, dev_Y)
     try:
         if options.output_file:
             print("Saving model to %s" % options.output_file)
