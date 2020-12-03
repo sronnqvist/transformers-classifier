@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=64G
 #SBATCH -p gpu
-#SBATCH -t 21:00:00
+#SBATCH -t 16:15:00
 #SBATCH --gres=gpu:v100:1
 #SBATCH --ntasks-per-node=1
 #SBATCH --account=Project_2002026
@@ -22,32 +22,36 @@ module purge
 module load tensorflow/2.2-hvd
 source transformers3.4/bin/activate
 
+
+
 export PYTHONPATH=/scratch/project_2002026/samuel/transformer-text-classifier/transformers3.4/lib/python3.7/site-packages:$PYTHONPATH
 
-SRC=en
-TRG=sv
+MODEL=$1
+MODEL_ALIAS=$2
+SRC=$3
+TRG=$4
+LR_=$5
+EPOCHS_=$6
+i=$7
+BS=7
+
+echo "MODEL:$MODEL"
+echo "MODEL_ALIAS:$MODEL_ALIAS"
+echo "SRC:$SRC"
+echo "TRG:$TRG"
+echo "LR:$LR_"
+echo "EPOCHS:$EPOCHS_"
+echo "i:$i"
+
 export TRAIN_DIR=data/eacl/$SRC
 export DEV_DIR=data/eacl/$TRG
 export OUTPUT_DIR=output
 
 mkdir -p "$OUTPUT_DIR"
 
-#MODEL="jplu/tf-camembert-base"
-#MODEL="jplu/tf-flaubert-base-cased"
-#MODEL="jplu/tf-flaubert-large-cased"
-#MODEL="jplu/tf-xlm-roberta-base"
-MODEL="jplu/tf-xlm-roberta-large"
-#MODEL="bert-base-multilingual-cased"
-#MODEL="bert-base-cased"
-#MODEL="bert-large-cased"
-#MODEL="bert-large-cased-whole-word-masking"
-#MODEL="TurkuNLP/bert-base-finnish-cased-v1"
-#MODEL="KB/bert-base-swedish-cased"
-BS=7
-
-for i in 1 2 3; do
-for EPOCHS in 3; do
-for LR in 2e-5; do
+for EPOCHS in $EPOCHS_; do
+for LR in $LR_; do
+for j in $i; do
 echo "Settings: src=$SRC trg=$TRG model=$MODEL lr=$LR epochs=$EPOCHS batch_size=$BS"
 echo "job=$SLURM_JOBID src=$SRC trg=$TRG model=$MODEL lr=$LR epochs=$EPOCHS batch_size=$BS" >> logs/experiments.log
 srun python train.py \
@@ -60,9 +64,9 @@ srun python train.py \
   --seq_len 512 \
   --epochs $EPOCHS \
   --batch_size $BS \
-  --output_file $OUTPUT_DIR/model_xlmrL_$SRC-$TRG-$i.h5 \
-  --log_file logs/train_xlmrL_$SRC-$TRG.tsv \
-  --test_log_file logs/test_xlmrL_$SRC-$TRG.tsv
+  --output_file $OUTPUT_DIR/$MODEL_ALIAS-$SRC-$TRG-lr$LR-ep$EPOCHS-$j.h5 \
+  --log_file logs/train_$MODEL_ALIAS-$SRC-$TRG.tsv \
+  --test_log_file logs/test_$MODEL_ALIAS-$SRC-$TRG.tsv
 #  --multiclass
 #--output_file $OUTPUT_DIR/model.h5 \
 #  --load_model $OUTPUT_DIR/model_nblocks3-ep10-2.h5 \
@@ -70,6 +74,9 @@ srun python train.py \
 done
 done
 done
+
+echo "job=$SLURM_JOBID src=$SRC trg=$TRG model=$MODEL lr=$LR epochs=$EPOCHS batch_size=$BS" >> logs/completed.log
+
 
 #rm -rf "$OUTPUT_DIR"
 #mkdir -p "$OUTPUT_DIR"
