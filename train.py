@@ -215,7 +215,7 @@ def prepare_classifier(num_train_examples, num_labels, options):
     return model, tokenizer, optimizer
 
 
-def optimize_threshold(model, train_X, train_Y, test_X, test_Y, options=None, epoch=None, save_pred=None):
+def optimize_threshold(model, train_X, train_Y, test_X, test_Y, options=None, epoch=None, save_pred_to=None):
     labels_prob = model.predict(train_X, verbose=1)#, batch_size=options.batch_size)
 
     best_f1 = 0.
@@ -246,13 +246,17 @@ def optimize_threshold(model, train_X, train_Y, test_X, test_Y, options=None, ep
         epoch_str = ""
     print("\nValidation/Test performance at threshold %.2f%s: Prec. %.4f, Recall %.4f, F1 %.4f" % (best_f1_threshold, epoch_str, test_precision, test_recall, test_f1))
 
-    if save_pred is not None:
+    if save_pred_to is not None:
         if epoch is None:
-            epoch = 'X'
-        print("Saving predictions to", save_pred+"-epoch%d.*.npy" % epoch)
-        np.save(save_pred+"-epoch%d.preds.npy" % epoch, test_labels_pred.toarray())
-        np.save(save_pred+"-epoch%d.gold.npy" % epoch, test_Y)
-        np.save(save_pred+"-epoch%d.class_labels.npy" % epoch, label_encoder.classes_)
+            print("Saving predictions to", save_pred_to+".*.npy" % epoch)
+            np.save(save_pred_to+".preds.npy", test_labels_pred.toarray())
+            np.save(save_pred_to+".gold.npy", test_Y)
+            np.save(save_pred_to+".class_labels.npy", label_encoder.classes_)
+        else:
+            print("Saving predictions to", save_pred_to+"-epoch%d.*.npy" % epoch)
+            np.save(save_pred_to+"-epoch%d.preds.npy" % epoch, test_labels_pred.toarray())
+            np.save(save_pred_to+"-epoch%d.gold.npy" % epoch, test_Y)
+            np.save(save_pred_to+"-epoch%d.class_labels.npy" % epoch, label_encoder.classes_)
 
     return test_f1, best_f1_threshold, test_labels_pred
 
@@ -298,7 +302,7 @@ class Logger:
 
 
 class EvalCallback(Callback):
-    def __init__(self, model, train_X, train_Y, dev_X, dev_Y, test_X=None, test_Y=None, logfile="train.log", test_logfile=None, save_pred=None, params={}):
+    def __init__(self, model, train_X, train_Y, dev_X, dev_Y, test_X=None, test_Y=None, logfile="train.log", test_logfile=None, save_pred_to=None, params={}):
         self.model = model
         self.train_X = train_X
         self.train_Y = train_Y
@@ -310,10 +314,11 @@ class EvalCallback(Callback):
         if test_logfile is not None:
             print("Setting up test set logging to", test_logfile, flush=True)
             self.test_logger = Logger(test_logfile, self.model, params)
-        if save_pred is not None:
-            self.save_pred = save_pred
+        if save_pred_to is not None:
+            self.save_pred_to = save_pred_to
         else:
-            self.save_pred = None
+            self.save_pred_to = None
+
     def on_epoch_end(self, epoch, logs={}):
         print("Validation set performance:")
         logs['f1'], _, _ = optimize_threshold(self.model, self.train_X, self.train_Y, self.dev_X, self.dev_Y, epoch=epoch)
@@ -323,7 +328,7 @@ class EvalCallback(Callback):
         self.logger.record(epoch, logs)
         if self.test_X is not None:
             print("Test set performance:")
-            test_f1, _, _ = optimize_threshold(self.model, self.train_X, self.train_Y, self.test_X, self.test_Y, epoch=epoch, save_pred=self.save_pred)
+            test_f1, _, _ = optimize_threshold(self.model, self.train_X, self.train_Y, self.test_X, self.test_Y, epoch=epoch, save_pred_to=self.save_pred_to)
             auc = test_auc(classifier, self.test_X, self.test_Y)
             print("AUC test:", auc)
             self.test_logger.record(epoch, {'f1': test_f1, 'rocauc': auc})
@@ -369,20 +374,11 @@ def main(argv):
 
         if options.test is not None:
             print("Evaluating on test set...")
-            #test_f1, test_th, test_pred = optimize_threshold(classifier, train_X, train_Y, test_X, test_Y, options, save_pred=options.output_file)
-            test_f1, test_th, test_pred = optimize_threshold(classifier, train_X, train_Y, test_X, test_Y, options)
+            test_f1, test_th, test_pred = optimize_threshold(classifier, train_X, train_Y, test_X, test_Y, options, save_pred_to=options.load_model)
+            #test_f1, test_th, test_pred = optimize_threshold(classifier, train_X, train_Y, test_X, test_Y, options)
             print("AUC test:", test_auc(classifier, test_X, test_Y))
 
-            if options.save_predictions:
-                np.save(options.load_model+".preds.npy", test_pred.toarray())
-                np.save(options.load_model+".gold.npy", test_Y)
-                np.save(options.load_model+".class_labels.npy", label_encoder.classes_)
-        elif options.save_predictions:
-            np.save(options.load_model+".preds.npy", dev_pred.toarray())
-            np.save(options.load_model+".gold.npy", dev_Y)
-            np.save(options.load_model+".class_labels.npy", label_encoder.classes_)
         #f1, th, dev_pred = test_threshold(classifier, dev_X, dev_Y, threshold=0.4)
-
         return
 
 
@@ -392,7 +388,7 @@ def main(argv):
         callbacks.append(EvalCallback(classifier, train_X, train_Y, dev_X, dev_Y, test_X=test_X, test_Y=test_Y,
                                     logfile=options.log_file,
                                     test_logfile=options.test_log_file,
-                                    save_pred=options.output_file,
+                                    save_pred_to=options.output_file,
                                     params={'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size}))
     else:
         print("Initializing evaluation with dev set...")
