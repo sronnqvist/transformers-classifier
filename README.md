@@ -1,6 +1,6 @@
 # transformer-text-classifier
 
-Text classification using Transformers, TensorFlow, and Keras. Adapted for register classification, base on original version by [Sampo Pyysalo](https://github.com/spyysalo/transformer-text-classifier).
+Text classification using Transformers, TensorFlow, and Keras. Adapted for register classification, based on original version by [Sampo Pyysalo](https://github.com/spyysalo/transformer-text-classifier).
 
 ## Quickstart
 
