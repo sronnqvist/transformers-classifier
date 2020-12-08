@@ -151,9 +151,9 @@ def build_classifier(pretrained_model, num_labels, optimizer, options):
         loss = BinaryCrossentropy()
         metrics = [
             #F1Score(name='f1_th0.3', num_classes=num_labels, average='micro', threshold=0.3),
-            F1Score(name='f1_th0.4', num_classes=num_labels, average='micro', threshold=0.4),
+            F1Score(name='f1_th0.4', num_classes=num_labels, average='micro', threshold=0.4)#,
             #F1Score(name='f1_th0.5', num_classes=num_labels, average='micro', threshold=0.5),
-            AUC(name='auc', multi_label=True)
+            #AUC(name='auc', multi_label=True)
         ]
     #output = pretrained_outputs # test
     model = Model(
@@ -185,6 +185,33 @@ def load_data(fn, options, max_chars=None):
     print(f'loaded {len(texts)} examples from {fn}', file=sys.stderr)
     return texts, labels
 
+
+def create_data_generator(dataset, tokenize_func, batch_size=DEFAULT_BATCH_SIZE, max_chars=None):
+    #TODO: generator, num_labels = data_generator(options.train, tokenize, options.batch_size, max_chars=25000)
+    def data_generator(file_path, batch_size, seq_len=512):
+        while True:
+            with xopen(file_path, "rt") as f:
+                _, label_dim = json.loads(f.readline())
+                text = []
+                labels = []
+                for line in f:
+                    if len(text) == batch_size:
+                        # Fun fact: the 2 inputs must be in a list, *not* a tuple. Why.
+                        yield ([np.asarray(text), np.zeros_like(text)], np.asarray(labels))
+                        text = []
+                        labels = []
+                    line = json.loads(line)
+                    # First sublist is token ids.
+                    text.append(np.asarray(line[0])[0:seq_len])
+
+                    # Second sublist is positive label indices.
+                    label_line = np.zeros(label_dim, dtype='b')
+                    label_line[line[1]] = 1
+                    labels.append(label_line)
+                # Yield what is left as the last batch when file has been read to its end.
+                yield ([np.asarray(text), np.zeros_like(text)], np.asarray(labels))
+
+        return data_generator, steps_per_epoch, num_labels
 
 def make_tokenization_function(tokenizer, options):
     seq_len = options.seq_len
@@ -362,6 +389,8 @@ def main(argv):
     tokenize = make_tokenization_function(tokenizer, options)
     train_X = tokenize(train_texts)
     dev_X = tokenize(dev_texts)
+
+    #TODO: generator, num_labels = data_generator(options.train, tokenize, options.batch_size, max_chars=25000)
     if options.test is not None:
         test_X = tokenize(test_texts)
 
