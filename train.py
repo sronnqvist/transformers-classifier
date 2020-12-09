@@ -17,6 +17,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import CategoricalCrossentropy, BinaryCrossentropy
 from tensorflow.keras.metrics import CategoricalAccuracy, AUC
 from tensorflow.keras.callbacks import Callback, ModelCheckpoint
+from tensorflow.keras.utils import Sequence, to_categorical
 from tensorflow.config import experimental as tfconf_exp
 
 from tensorflow_addons.metrics import F1Score
@@ -186,32 +187,46 @@ def load_data(fn, options, max_chars=None):
     return texts, labels
 
 
-def create_data_generator(dataset, tokenize_func, batch_size=DEFAULT_BATCH_SIZE, max_chars=None):
-    #TODO: generator, num_labels = data_generator(options.train, tokenize, options.batch_size, max_chars=25000)
-    def data_generator(file_path, batch_size, seq_len=512):
-        while True:
-            with xopen(file_path, "rt") as f:
-                _, label_dim = json.loads(f.readline())
-                text = []
-                labels = []
-                for line in f:
-                    if len(text) == batch_size:
-                        # Fun fact: the 2 inputs must be in a list, *not* a tuple. Why.
-                        yield ([np.asarray(text), np.zeros_like(text)], np.asarray(labels))
-                        text = []
-                        labels = []
-                    line = json.loads(line)
-                    # First sublist is token ids.
-                    text.append(np.asarray(line[0])[0:seq_len])
+class DataGenerator(Sequence):
+    def __init__(self, data_path, tokenize_func, options, max_chars=None, label_encoder=None):
+        texts, labels = load_data(data_path, options, max_chars=max_chars)
+        self.num_examples = len(texts)
+        self.batch_size = options.batch_size
+        #self.seq_len = options.seq_len
+        self.X = tokenize_func(texts)
 
-                    # Second sublist is positive label indices.
-                    label_line = np.zeros(label_dim, dtype='b')
-                    label_line[line[1]] = 1
-                    labels.append(label_line)
-                # Yield what is left as the last batch when file has been read to its end.
-                yield ([np.asarray(text), np.zeros_like(text)], np.asarray(labels))
+        if label_encoder is None:
+            self.label_encoder = MultiLabelBinarizer()
+            self.label_encoder.fit(labels)
+        else:
+            self.label_encoder = label_encoder
 
-        return data_generator, steps_per_epoch, num_labels
+        self.Y = self.label_encoder.transform(labels)
+        self.num_labels = len(self.label_encoder.classes_)
+
+        self.on_epoch_end()
+
+    def on_epoch_end(self):
+        self.indexes = np.arange(self.num_examples)
+        np.random.shuffle(self.indexes)
+
+    def __len__(self):
+        return self.num_examples//self.batch_size
+
+    def __getitem__(self, index):
+        batch_indexes = self.indexes[index*self.batch_size:(index+1)*self.batch_size]
+        batch_X = {}
+        for key in self.X:
+            batch_X[key] = np.empty((self.batch_size, *self.X[key].shape[1:]))
+            for j, idx in enumerate(batch_indexes):
+                batch_X[key][j] = self.X[key][idx]
+
+        batch_y = np.empty((self.batch_size, *self.Y.shape[1:]), dtype=int)
+        for j, idx in enumerate(batch_indexes):
+            batch_y[j] = self.Y[idx]
+
+        return batch_X, batch_y
+
 
 def make_tokenization_function(tokenizer, options):
     seq_len = options.seq_len
@@ -278,17 +293,17 @@ def optimize_threshold(model, train_X, train_Y, test_X, test_Y, options=None, ep
             print("Saving predictions to", save_pred_to+".*.npy" % epoch)
             np.save(save_pred_to+".preds.npy", test_labels_pred.toarray())
             np.save(save_pred_to+".gold.npy", test_Y)
-            np.save(save_pred_to+".class_labels.npy", label_encoder.classes_)
+            #np.save(save_pred_to+".class_labels.npy", label_encoder.classes_)
         else:
             print("Saving predictions to", save_pred_to+"-epoch%d.*.npy" % epoch)
             np.save(save_pred_to+"-epoch%d.preds.npy" % epoch, test_labels_pred.toarray())
             np.save(save_pred_to+"-epoch%d.gold.npy" % epoch, test_Y)
-            np.save(save_pred_to+"-epoch%d.class_labels.npy" % epoch, label_encoder.classes_)
+            #np.save(save_pred_to+"-epoch%d.class_labels.npy" % epoch, label_encoder.classes_)
 
     return test_f1, best_f1_threshold, test_labels_pred
 
 
-def test_threshold(model, test_X, test_Y, options, threshold=0.4, options=None, epoch=None):
+def test_threshold(model, test_X, test_Y, threshold=0.4, options=None, epoch=None):
     test_labels_prob = model.predict(test_X, verbose=1)#, batch_size=options.batch_size)
     test_labels_pred = lil_matrix(test_labels_prob.shape, dtype='b')
     test_labels_pred[test_labels_prob>=threshold] = 1
@@ -349,14 +364,14 @@ class EvalCallback(Callback):
     def on_epoch_end(self, epoch, logs={}):
         print("Validation set performance:")
         logs['f1'], _, _ = optimize_threshold(self.model, self.train_X, self.train_Y, self.dev_X, self.dev_Y, epoch=epoch)
-        logs['rocauc'] = test_auc(classifier, self.dev_X, self.dev_Y)
+        logs['rocauc'] = test_auc(self.model, self.dev_X, self.dev_Y)
         print("AUC dev:", logs['rocauc'])
 
         self.logger.record(epoch, logs)
         if self.test_X is not None:
             print("Test set performance:")
             test_f1, _, _ = optimize_threshold(self.model, self.train_X, self.train_Y, self.test_X, self.test_Y, epoch=epoch, save_pred_to=self.save_pred_to)
-            auc = test_auc(classifier, self.test_X, self.test_Y)
+            auc = test_auc(self.model, self.test_X, self.test_Y)
             print("AUC test:", auc)
             self.test_logger.record(epoch, {'f1': test_f1, 'rocauc': auc})
 
@@ -390,7 +405,9 @@ def main(argv):
     train_X = tokenize(train_texts)
     dev_X = tokenize(dev_texts)
 
-    #TODO: generator, num_labels = data_generator(options.train, tokenize, options.batch_size, max_chars=25000)
+    #train_gen = DataGenerator(options.train, tokenize, options, max_chars=25000)
+    #dev_gen = DataGenerator(options.dev, tokenize, options, max_chars=25000, label_encoder=train_gen.label_encoder)
+
     if options.test is not None:
         test_X = tokenize(test_texts)
 
@@ -404,6 +421,7 @@ def main(argv):
         if options.test is not None:
             print("Evaluating on test set...")
             test_f1, test_th, test_pred = optimize_threshold(classifier, train_X, train_Y, test_X, test_Y, options, save_pred_to=options.load_model)
+            np.save(options.load_model+".class_labels.npy", label_encoder.classes_)
             #test_f1, test_th, test_pred = optimize_threshold(classifier, train_X, train_Y, test_X, test_Y, options)
             print("AUC test:", test_auc(classifier, test_X, test_Y))
 
@@ -433,6 +451,17 @@ def main(argv):
         validation_data=(dev_X, dev_Y),
         callbacks=callbacks
     )
+    """
+    history = classifier.fit_generator(
+        train_gen,
+        steps_per_epoch=len(train_gen),
+        validation_data=dev_gen,
+        initial_epoch=0,
+        epochs=options.epochs,
+        callbacks=callbacks
+    )"""
+
+
     try:
         if options.output_file:
             print("Saving model to %s" % options.output_file)
