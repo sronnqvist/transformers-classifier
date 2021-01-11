@@ -127,9 +127,11 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
-:logs
-:output
-:predictions
-:tmp
-:transformers3.4
-:data
+
+# Custom
+logs
+output
+predictions
+tmp
+transformers3.4
+data
