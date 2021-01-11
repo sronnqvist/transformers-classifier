@@ -59,6 +59,11 @@ def argparser():
                     help='development data')
     ap.add_argument('--test', metavar='FILE', required=False,
                     help='test data', default=None)
+    ap.add_argument('--bg_train', metavar='FILE', required=False,
+                    help='background corpus for training', default=None)
+    ap.add_argument('--bg_sample_rate', metavar='FLOAT', type=float,
+                    default=1.,
+                    help='rate at which to sample from background corpus (X:1)')
     ap.add_argument('--batch_size', metavar='INT', type=int,
                     default=DEFAULT_BATCH_SIZE,
                     help='batch size for training')
@@ -188,7 +193,7 @@ def load_data(fn, options, max_chars=None):
 
 
 class DataGenerator(Sequence):
-    def __init__(self, data_path, tokenize_func, options, max_chars=None, label_encoder=None):
+    def __init__(self, data_path, tokenize_func, options, bg_data_path=None, bg_sample_rate=1., max_chars=None, label_encoder=None):
         texts, labels = load_data(data_path, options, max_chars=max_chars)
         self.num_examples = len(texts)
         self.batch_size = options.batch_size
@@ -204,26 +209,59 @@ class DataGenerator(Sequence):
         self.Y = self.label_encoder.transform(labels)
         self.num_labels = len(self.label_encoder.classes_)
 
+        if bg_data_path is not None:
+            self.bg_sample_rate = bg_sample_rate
+            bg_texts, bg_labels = load_data(bg_data_path, options, max_chars=max_chars)
+            self.bg_num_examples = len(bg_texts)
+            self.bg_X = tokenize_func(bg_texts)
+
+            self.bg_Y = self.label_encoder.transform(bg_labels)
+            #self.bg_num_labels = len(self.label_encoder.classes_)
+        else:
+            self.bg_sample_rate = 0
+            self.bg_num_examples = 0
+
         self.on_epoch_end()
+
 
     def on_epoch_end(self):
         self.indexes = np.arange(self.num_examples)
         np.random.shuffle(self.indexes)
 
+        if self.bg_sample_rate > 0:
+            if hasattr(self, "bg_indexes"):
+                seen_bg_idxs = self.bg_indexes[:len(self.indexes)]
+                unseen_bg_idxs = self.bg_indexes[len(self.indexes):]
+                np.random.shuffle(seen_bg_idxs)
+                self.bg_indexes = np.concatenate([unseen_bg_idxs, seen_bg_idxs])
+            else:
+                self.bg_indexes = np.arange(self.bg_num_examples)
+                np.random.shuffle(self.bg_indexes)
+
+        self.index = 0
+
+
     def __len__(self):
-        return self.num_examples//self.batch_size
+        return int((self.num_examples//self.batch_size)*(1+self.bg_sample_rate))
 
     def __getitem__(self, index):
-        batch_indexes = self.indexes[index*self.batch_size:(index+1)*self.batch_size]
+        if np.random.random() <= 1/(self.bg_sample_rate+1):
+            batch_indexes = self.indexes[self.index*self.batch_size:(self.index+1)*self.batch_size]
+            self.index += 1
+            X, Y = self.X, self.Y
+        else:
+            batch_indexes = self.bg_indexes[self.index*self.batch_size:(self.index+1)*self.batch_size]
+            X, Y = self.bg_X, self.bg_Y
+
         batch_X = {}
         for key in self.X:
-            batch_X[key] = np.empty((self.batch_size, *self.X[key].shape[1:]))
+            batch_X[key] = np.empty((self.batch_size, *X[key].shape[1:]))
             for j, idx in enumerate(batch_indexes):
-                batch_X[key][j] = self.X[key][idx]
+                batch_X[key][j] = X[key][idx]
 
-        batch_y = np.empty((self.batch_size, *self.Y.shape[1:]), dtype=int)
+        batch_y = np.empty((self.batch_size, *Y.shape[1:]), dtype=int)
         for j, idx in enumerate(batch_indexes):
-            batch_y[j] = self.Y[idx]
+            batch_y[j] = Y[idx]
 
         return batch_X, batch_y
 
@@ -380,34 +418,55 @@ def main(argv):
     init_tf_memory()
     options = argparser().parse_args(argv[1:])
 
+    ### Load data without generator
     train_texts, train_labels = load_data(options.train, options, max_chars=25000)
     dev_texts, dev_labels = load_data(options.dev, options, max_chars=25000)
     if options.test is not None:
         test_texts, test_labels = load_data(options.test, options, max_chars=25000)
-    num_train_examples = len(train_texts)
+    #num_train_examples = len(train_texts)
 
-    label_encoder = MultiLabelBinarizer()
-    label_encoder.fit(train_labels)
-    train_Y = label_encoder.transform(train_labels)
-    dev_Y = label_encoder.transform(dev_labels)
-    if options.test is not None:
-        test_Y = label_encoder.transform(test_labels)
-
-    num_labels = len(label_encoder.classes_)
-
-    classifier, tokenizer, optimizer = prepare_classifier(
+    """classifier, tokenizer, optimizer = prepare_classifier(
         num_train_examples,
         num_labels,
         options
-    )
+    )"""
+    ### end of data loading
 
+    pretrained_model, tokenizer, model_config = load_pretrained(options)
     tokenize = make_tokenization_function(tokenizer, options)
+
     train_X = tokenize(train_texts)
     dev_X = tokenize(dev_texts)
 
-    #train_gen = DataGenerator(options.train, tokenize, options, max_chars=25000)
-    #dev_gen = DataGenerator(options.dev, tokenize, options, max_chars=25000, label_encoder=train_gen.label_encoder)
+    if options.bg_train is None:
+        train_gen = DataGenerator(options.train, tokenize, options, max_chars=25000)
+    else:
+        train_gen = DataGenerator(options.train, tokenize, options, max_chars=25000, bg_data_path=options.bg_train, bg_sample_rate=options.bg_sample_rate)
+    dev_gen = DataGenerator(options.dev, tokenize, options, max_chars=25000, label_encoder=train_gen.label_encoder)
 
+    optimizer = get_optimizer(train_gen.num_examples+train_gen.bg_num_examples, options)
+    classifier = build_classifier(pretrained_model, train_gen.num_labels, optimizer, options)
+    """classifier, tokenizer, optimizer = prepare_classifier(
+        train_gen.num_examples,
+        train_gen.num_labels,
+        options
+    )"""
+
+    """label_encoder = MultiLabelBinarizer()
+    label_encoder.fit(train_labels)
+    train_Y = label_encoder.transform(train_labels)
+    dev_Y = label_encoder.transform(dev_labels)"""
+    train_Y = train_gen.label_encoder.transform(train_labels)
+    dev_Y = train_gen.label_encoder.transform(dev_labels)
+    if options.test is not None:
+        #test_Y = label_encoder.transform(test_labels)
+        test_Y = train_gen.label_encoder.transform(test_labels)
+
+    #num_labels = len(label_encoder.classes_)
+
+
+
+    options.test = None # TODO: adapt generator to test set
     if options.test is not None:
         test_X = tokenize(test_texts)
 
@@ -443,7 +502,7 @@ def main(argv):
                                     logfile=options.log_file,
                                     params={'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size}))
 
-    history = classifier.fit(
+    """history = classifier.fit(
         train_X,
         train_Y,
         epochs=options.epochs,
@@ -454,12 +513,12 @@ def main(argv):
     """
     history = classifier.fit_generator(
         train_gen,
-        steps_per_epoch=len(train_gen),
+        #steps_per_epoch=len(train_gen),
         validation_data=dev_gen,
         initial_epoch=0,
         epochs=options.epochs,
         callbacks=callbacks
-    )"""
+    )
 
 
     try:

@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=64G
 #SBATCH -p gpu
-#SBATCH -t 21:00:00
+#SBATCH -t 12:15:00
 #SBATCH --gres=gpu:v100:1
 #SBATCH --ntasks-per-node=1
 #SBATCH --account=Project_2002026
@@ -24,10 +24,12 @@ source transformers3.4/bin/activate
 
 export PYTHONPATH=/scratch/project_2002026/samuel/transformer-text-classifier/transformers3.4/lib/python3.7/site-packages:$PYTHONPATH
 
-SRC=en
-TRG=sv
+SRC=fr
+TRG=fr
+BG=en
 export TRAIN_DIR=data/eacl/$SRC
 export DEV_DIR=data/eacl/$TRG
+export BG_DIR=data/eacl/$BG
 export OUTPUT_DIR=output
 
 mkdir -p "$OUTPUT_DIR"
@@ -44,25 +46,28 @@ MODEL="jplu/tf-xlm-roberta-large"
 #MODEL="TurkuNLP/bert-base-finnish-cased-v1"
 #MODEL="KB/bert-base-swedish-cased"
 BS=7
+BGrate=0.25
 
-for i in 1 2 3; do
-for EPOCHS in 3; do
-for LR in 2e-5; do
-echo "Settings: src=$SRC trg=$TRG model=$MODEL lr=$LR epochs=$EPOCHS batch_size=$BS"
-echo "job=$SLURM_JOBID src=$SRC trg=$TRG model=$MODEL lr=$LR epochs=$EPOCHS batch_size=$BS" >> logs/experiments.log
+for i in 1; do
+for EPOCHS in 50; do
+for LR in 2e-6; do
+echo "Settings: src=$SRC trg=$TRG bg=$BG model=$MODEL lr=$LR epochs=$EPOCHS batch_size=$BS"
+echo "job=$SLURM_JOBID src=$SRC trg=$TRG bg=$BG model=$MODEL lr=$LR epochs=$EPOCHS batch_size=$BS bg_rate=$BGrate" >> logs/experiments.log
 srun python train.py \
   --model_name $MODEL \
   --train $TRAIN_DIR/train.tsv \
   --dev $DEV_DIR/dev.tsv \
-  --test $DEV_DIR/test.tsv \
+  --bg_train $BG_DIR/train.tsv \
+  --bg_sample_rate $BGrate \
   --input_format tsv \
   --lr $LR \
   --seq_len 512 \
   --epochs $EPOCHS \
   --batch_size $BS \
-  --output_file $OUTPUT_DIR/model_xlmrL_$SRC-$TRG-$i.h5 \
-  --log_file logs/train_xlmrL_$SRC-$TRG.tsv \
-  --test_log_file logs/test_xlmrL_$SRC-$TRG.tsv
+  --output_file $OUTPUT_DIR/model_xlmrL_$BG++$SRC-$TRG-$i.h5 \
+  --log_file logs/train_xlmrL_$BG++$SRC-$TRG.tsv
+#  --test $DEV_DIR/test.tsv \
+#  --test_log_file logs/test_xlmrL_$BG++$SRC-$TRG.tsv
 #  --multiclass
 #--output_file $OUTPUT_DIR/model.h5 \
 #  --load_model $OUTPUT_DIR/model_nblocks3-ep10-2.h5 \
