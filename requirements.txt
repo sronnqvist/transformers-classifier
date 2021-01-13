@@ -1,4 +1,5 @@
 tensorflow>=2.2
 transformers>=3.4
-tensorflow-addons
+tensorflow-addons==0.11.2
 scikit-learn
+sentencepiece
