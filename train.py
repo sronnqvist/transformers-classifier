@@ -211,15 +211,19 @@ class DataGenerator(Sequence):
 
         if bg_data_path is not None:
             self.bg_sample_rate = bg_sample_rate
-            bg_texts, bg_labels = load_data(bg_data_path, options, max_chars=max_chars)
-            self.bg_num_examples = len(bg_texts)
-            self.bg_X = tokenize_func(bg_texts)
+            self.bg_num_examples, self.bg_X, self.bg_Y = [], [], []
+            for path in bg_data_path.split():
+                bg_texts, bg_labels = load_data(path, options, max_chars=max_chars)
+                self.bg_num_examples.append(len(bg_texts))
+                self.bg_X.append(tokenize_func(bg_texts))
 
-            self.bg_Y = self.label_encoder.transform(bg_labels)
+                self.bg_Y.append(self.label_encoder.transform(bg_labels))
             #self.bg_num_labels = len(self.label_encoder.classes_)
+            self.bg_num_corpora = len(self.bg_num_examples)
         else:
             self.bg_sample_rate = 0
-            self.bg_num_examples = 0
+            self.bg_num_examples = [0]
+            self.bg_num_corpora = 0
 
         self.on_epoch_end()
 
@@ -230,28 +234,41 @@ class DataGenerator(Sequence):
 
         if self.bg_sample_rate > 0:
             if hasattr(self, "bg_indexes"):
-                seen_bg_idxs = self.bg_indexes[:len(self.indexes)]
-                unseen_bg_idxs = self.bg_indexes[len(self.indexes):]
-                np.random.shuffle(seen_bg_idxs)
-                self.bg_indexes = np.concatenate([unseen_bg_idxs, seen_bg_idxs])
+                for i, bg_indexes in enumerate(self.bg_indexes):
+                    seen_bg_idxs = bg_indexes[:len(self.indexes)]
+                    unseen_bg_idxs = bg_indexes[len(self.indexes):]
+                    np.random.shuffle(seen_bg_idxs)
+                    self.bg_indexes[i] = np.concatenate([unseen_bg_idxs, seen_bg_idxs])
             else:
-                self.bg_indexes = np.arange(self.bg_num_examples)
-                np.random.shuffle(self.bg_indexes)
+                self.bg_indexes = [np.arange(x) for x in self.bg_num_examples]
+                for i,_ in enumerate(self.bg_indexes):
+                    np.random.shuffle(self.bg_indexes[i])
 
         self.index = 0
 
 
     def __len__(self):
-        return int((self.num_examples//self.batch_size)*(1+self.bg_sample_rate))
+        return int((self.num_examples//self.batch_size)*(1+self.bg_sample_rate)) * self.bg_num_corpora
 
     def __getitem__(self, index):
-        if np.random.random() <= 1/(self.bg_sample_rate+1):
+        if np.random.random() <= 1/(self.bg_sample_rate+self.bg_num_corpora):
             batch_indexes = self.indexes[self.index*self.batch_size:(self.index+1)*self.batch_size]
             self.index += 1
             X, Y = self.X, self.Y
         else:
-            batch_indexes = self.bg_indexes[self.index*self.batch_size:(self.index+1)*self.batch_size]
-            X, Y = self.bg_X, self.bg_Y
+            i = np.random.random_integers(0,self.bg_num_corpora-1)
+            try:
+                batch_indexes = self.bg_indexes[i][self.index*self.batch_size:(self.index+1)*self.batch_size]
+            except IndexError:
+                end = ((self.index+1)*self.batch_size) % len(self.bg_indexes[i])
+                if end < self.batch_size:
+                    end = self.batch_size
+                    beg = 0
+                else:
+                    beg = end-self.batch_size
+                batch_indexes = self.bg_indexes[i][beg:end]
+
+            X, Y = self.bg_X[i], self.bg_Y[i]
 
         batch_X = {}
         for key in self.X:
@@ -444,7 +461,7 @@ def main(argv):
         train_gen = DataGenerator(options.train, tokenize, options, max_chars=25000, bg_data_path=options.bg_train, bg_sample_rate=options.bg_sample_rate)
     dev_gen = DataGenerator(options.dev, tokenize, options, max_chars=25000, label_encoder=train_gen.label_encoder)
 
-    optimizer = get_optimizer(train_gen.num_examples+train_gen.bg_num_examples, options)
+    optimizer = get_optimizer(train_gen.num_examples*(1+train_gen.bg_sample_rate*train_gen.bg_num_corpora), options)
     classifier = build_classifier(pretrained_model, train_gen.num_labels, optimizer, options)
     """classifier, tokenizer, optimizer = prepare_classifier(
         train_gen.num_examples,

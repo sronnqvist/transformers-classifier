@@ -24,12 +24,13 @@ source transformers3.4/bin/activate
 
 export PYTHONPATH=/scratch/project_2002026/samuel/transformer-text-classifier/transformers3.4/lib/python3.7/site-packages:$PYTHONPATH
 
-SRC=fr
-TRG=fr
-BG=en
+SRC=sv
+TRG=en
+BG="en fi fr"
 export TRAIN_DIR=data/eacl/$SRC
 export DEV_DIR=data/eacl/$TRG
-export BG_DIR=data/eacl/$BG
+#export BG_DIR=data/eacl/$BG
+export BG_FILES="data/eacl/en/train.tsv data/eacl/fi/train.tsv data/eacl/fr/train.tsv"
 export OUTPUT_DIR=output
 
 mkdir -p "$OUTPUT_DIR"
@@ -46,10 +47,10 @@ MODEL="jplu/tf-xlm-roberta-large"
 #MODEL="TurkuNLP/bert-base-finnish-cased-v1"
 #MODEL="KB/bert-base-swedish-cased"
 BS=7
-BGrate=0.25
+BGrate=1.0
 
 for i in 1; do
-for EPOCHS in 50; do
+for EPOCHS in 100; do
 for LR in 2e-6; do
 echo "Settings: src=$SRC trg=$TRG bg=$BG model=$MODEL lr=$LR epochs=$EPOCHS batch_size=$BS"
 echo "job=$SLURM_JOBID src=$SRC trg=$TRG bg=$BG model=$MODEL lr=$LR epochs=$EPOCHS batch_size=$BS bg_rate=$BGrate" >> logs/experiments.log
@@ -57,15 +58,15 @@ srun python train.py \
   --model_name $MODEL \
   --train $TRAIN_DIR/train.tsv \
   --dev $DEV_DIR/dev.tsv \
-  --bg_train $BG_DIR/train.tsv \
+  --bg_train "$BG_FILES" \
   --bg_sample_rate $BGrate \
   --input_format tsv \
   --lr $LR \
   --seq_len 512 \
   --epochs $EPOCHS \
   --batch_size $BS \
-  --output_file $OUTPUT_DIR/model_xlmrL_$BG++$SRC-$TRG-$i.h5 \
-  --log_file logs/train_xlmrL_$BG++$SRC-$TRG.tsv
+  --output_file "$OUTPUT_DIR/model_xlmrL_$BG++$SRC-$TRG-$i.h5" \
+  --log_file "logs/train_xlmrL_$BG++$SRC-$TRG.tsv"
 #  --test $DEV_DIR/test.tsv \
 #  --test_log_file logs/test_xlmrL_$BG++$SRC-$TRG.tsv
 #  --multiclass
