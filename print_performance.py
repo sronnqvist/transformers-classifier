@@ -4,19 +4,25 @@ import collections
 import numpy as np
 
 
+IGNORE_EPOCH = True
+
 data = collections.defaultdict(lambda: [])
 for filename in sys.argv[1:]:
     with open(filename) as f:
         reader = csv.DictReader(f)
         for row in reader:
-            setting = tuple(((k,row[k]) for k in row.keys() if k.startswith('p') or k == '_Epoch'))
+            if IGNORE_EPOCH:
+                setting = tuple(((k,row[k]) for k in row.keys() if k.startswith('p')))
+            else:
+                setting = tuple(((k,row[k]) for k in row.keys() if k.startswith('p') or k == '_Epoch'))
             results = {k: row[k] for k in row.keys() if not (k.startswith('p') or k == '_Epoch')}
             data[setting].append(results)
 
 mean = (lambda x: sum(x)/len(x))
 try:
     ranking = [(np.mean([float(x['_f1']) for x in data[setting]]),
-                   np.mean([float(x['_val_auc']) for x in data[setting]]),
+                   #np.mean([float(x['_val_auc']) for x in data[setting]]),
+                   np.mean([float(x['_rocauc']) for x in data[setting]]),
                    setting) for setting in data]
 except KeyError:
     ranking = [(np.mean([float(x['_f1']) for x in data[setting]]),
@@ -46,7 +52,8 @@ print("F1\t(sd)\tAUC\t(sd)\t%s\tNexp" % '\t'.join([x for x,_ in ranking[0][-1]])
 for i, x in enumerate(sorted(ranking, key=lambda x: -x[0])[:20]):
     if len(x) == 3:
         f1, auc, setting = x
-        print("%.4f (%.4f)\t%.4f (%.4f)\t%s\t%s" % (f1, np.std([float(x['_f1']) for x in data[setting]]), auc, np.std([float(x['_val_auc']) for x in data[setting]]), '\t'.join([x for _,x in setting]), len(data[setting])))
+        #print("%.4f (%.4f)\t%.4f (%.4f)\t%s\t%s" % (f1, np.std([float(x['_f1']) for x in data[setting]]), auc, np.std([float(x['_val_auc']) for x in data[setting]]), '\t'.join([x for _,x in setting]), len(data[setting])))
+        print("%.4f (%.4f)\t%.4f (%.4f)\t%s\t%s" % (f1, np.std([float(x['_f1']) for x in data[setting]]), auc, np.std([float(x['_rocauc']) for x in data[setting]]), '\t'.join([x for _,x in setting]), len(data[setting])))
     else:
         f1, setting = x
         print("%.4f (%.4f)\t--- (---)\t%s\t%s" % (f1, np.std([float(x['_f1']) for x in data[setting]]), '\t'.join([x for _,x in setting]), len(data[setting])))
@@ -55,5 +62,6 @@ print()
 if len(ranking[0]) == 3:
     for i, x in enumerate(sorted(ranking, key=lambda x: -x[1])[:10]):
         f1, auc, setting = x
-        print("%.4f (%.4f)\t%.4f (%.4f)\t%s\t%s" % (f1, np.std([float(x['_f1']) for x in data[setting]]), auc, np.std([float(x['_val_auc']) for x in data[setting]]), '\t'.join([x for _,x in setting]), len(data[setting])))
+        #print("%.4f (%.4f)\t%.4f (%.4f)\t%s\t%s" % (f1, np.std([float(x['_f1']) for x in data[setting]]), auc, np.std([float(x['_val_auc']) for x in data[setting]]), '\t'.join([x for _,x in setting]), len(data[setting])))
+        print("%.4f (%.4f)\t%.4f (%.4f)\t%s\t%s" % (f1, np.std([float(x['_f1']) for x in data[setting]]), auc, np.std([float(x['_rocauc']) for x in data[setting]]), '\t'.join([x for _,x in setting]), len(data[setting])))
     #print("%.4f\t%.4f\t%.4f\t%.4f\t%s\t%s" % (f1, auc, '\t'.join([x for _,x in setting]), len(data[setting])))

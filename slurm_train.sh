@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=64G
 #SBATCH -p gpu
-#SBATCH -t 12:15:00
+#SBATCH -t 23:15:00
 #SBATCH --gres=gpu:v100:1
 #SBATCH --ntasks-per-node=1
 #SBATCH --account=Project_2002026
@@ -25,7 +25,7 @@ source transformers3.4/bin/activate
 export PYTHONPATH=/scratch/project_2002026/samuel/transformer-text-classifier/transformers3.4/lib/python3.7/site-packages:$PYTHONPATH
 
 SRC=sv
-TRG=en
+TRG=$1
 BG="en fi fr"
 export TRAIN_DIR=data/eacl/$SRC
 export DEV_DIR=data/eacl/$TRG
@@ -49,9 +49,9 @@ MODEL="jplu/tf-xlm-roberta-large"
 BS=7
 BGrate=1.0
 
-for i in 1; do
-for EPOCHS in 100; do
-for LR in 2e-6; do
+for i in $4; do
+for EPOCHS in $3; do
+for LR in $2; do
 echo "Settings: src=$SRC trg=$TRG bg=$BG model=$MODEL lr=$LR epochs=$EPOCHS batch_size=$BS"
 echo "job=$SLURM_JOBID src=$SRC trg=$TRG bg=$BG model=$MODEL lr=$LR epochs=$EPOCHS batch_size=$BS bg_rate=$BGrate" >> logs/experiments.log
 srun python train.py \
@@ -65,8 +65,8 @@ srun python train.py \
   --seq_len 512 \
   --epochs $EPOCHS \
   --batch_size $BS \
-  --output_file "$OUTPUT_DIR/model_xlmrL_$BG++$SRC-$TRG-$i.h5" \
-  --log_file "logs/train_xlmrL_$BG++$SRC-$TRG.tsv"
+  --output_file "$OUTPUT_DIR/model_xlmrL_$BG $SRC-$TRG-$i.h5" \
+  --log_file "logs/train_xlmrL_$BG $SRC-$TRG.tsv"
 #  --test $DEV_DIR/test.tsv \
 #  --test_log_file logs/test_xlmrL_$BG++$SRC-$TRG.tsv
 #  --multiclass
