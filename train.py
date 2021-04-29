@@ -692,7 +692,7 @@ def main(argv):
 
     if options.load_weights is not None:
         print("Loading weights from", options.load_weights)
-        classifier.load_weights(options.load_model)
+        classifier.load_weights(options.load_weights)
     elif options.load_model is not None:
         print("Loading model from", options.load_model)
         classifier, tokenizer, labels, config = load_trained_model(options.load_model)
@@ -712,12 +712,12 @@ def main(argv):
         if options.test is not None:
             print("Evaluating on test set...")
             if options.threshold is None:
-                test_f1, test_th, test_pred = optimize_threshold(classifier, train_X, train_Y, test_X, test_Y, options, save_pred_to=options.load_model)
+                test_f1, test_th, test_pred = optimize_threshold(classifier, train_X, train_Y, test_X, test_Y, options, save_pred_to=options.save_predictions)
             else:
                 for i in range(len(test_Xs)):
                     print("  %d" % i)
                     test_X, test_Y = test_Xs[i], test_Ys[i]
-                    test_f1, test_th, test_pred = test_threshold(classifier, test_X, test_Y, threshold=options.threshold, save_pred_to=options.load_model)
+                    test_f1, test_th, test_pred = test_threshold(classifier, test_X, test_Y, threshold=options.threshold, save_pred_to=options.save_predictions)
 
             np.save(options.save_predictions+".class_labels.npy", train_gen.label_encoder.classes_) ## TODO: move? train_gen dep?
             #test_f1, test_th, test_pred = optimize_threshold(classifier, train_X, train_Y, test_X, test_Y, options)
