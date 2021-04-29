@@ -12,19 +12,20 @@ for filename in sys.argv[1:]:
         reader = csv.DictReader(f)
         for row in reader:
             if IGNORE_EPOCH:
-                setting = tuple(((k,row[k]) for k in row.keys() if k.startswith('p')))
+                setting = tuple(((k,row[k]) for k in row.keys() if k is not None and k.startswith('p')))
             else:
-                setting = tuple(((k,row[k]) for k in row.keys() if k.startswith('p') or k == '_Epoch'))
-            results = {k: row[k] for k in row.keys() if not (k.startswith('p') or k == '_Epoch')}
+                setting = tuple(((k,row[k]) for k in row.keys() if k is not None and k.startswith('p') or k == '_Epoch'))
+            results = {k: row[k] for k in row.keys() if k is not None and not (k.startswith('p') or k == '_Epoch')}
             data[setting].append(results)
 
 mean = (lambda x: sum(x)/len(x))
 try:
+    #ranking = [(np.mean([float(x['_val_f1_th0.5']) for x in data[setting]]),
     ranking = [(np.mean([float(x['_f1']) for x in data[setting]]),
-                   #np.mean([float(x['_val_auc']) for x in data[setting]]),
                    np.mean([float(x['_rocauc']) for x in data[setting]]),
                    setting) for setting in data]
 except KeyError:
+    #ranking = [(np.mean([float(x['_val_f1_th0.5']) for x in data[setting]]),
     ranking = [(np.mean([float(x['_f1']) for x in data[setting]]),
                    setting) for setting in data]
 

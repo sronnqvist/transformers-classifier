@@ -24,3 +24,7 @@ Launch multiple instances with slurm:
 
     e.g., to test two learning rates and number of epochs each 3 times:
     sbatch slurm_train_arg.sh "jplu/tf-xlm-roberta-large" xlmrL en fi "8e-6 1e-5" "3 5" "1 2 3"
+
+UPDATED:
+    Training: `sbatch slurm_train.sh [TARGET_LANGUAGE] [LR] [EPOCHS] [INSTANCE]`, e.g., `sbatch slurm_train.sh fi 1e-6 75 1`
+    Evaluation only: `sbatch slurm_load.sh [TARGET_LANGUAGE] [MODEL WEIGHTS FILE]`

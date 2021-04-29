@@ -3,7 +3,8 @@
 import sys
 import math
 import numpy as np
-from os.path import isfile
+from os.path import isfile, join as join_path
+from os import makedirs
 import csv
 
 from scipy.sparse import lil_matrix
@@ -16,13 +17,13 @@ from tensorflow.keras.layers import Input, Dropout, Dense
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import CategoricalCrossentropy, BinaryCrossentropy
 from tensorflow.keras.metrics import CategoricalAccuracy, AUC
-from tensorflow.keras.callbacks import Callback, ModelCheckpoint
+from tensorflow.keras.callbacks import Callback, ModelCheckpoint, EarlyStopping
 from tensorflow.keras.utils import Sequence, to_categorical
 from tensorflow.config import experimental as tfconf_exp
-
+from tensorflow.keras.models import load_model
 from tensorflow_addons.metrics import F1Score
 
-from transformers import AutoConfig, AutoTokenizer, TFAutoModel, TFAutoModelForSequenceClassification
+from transformers import AutoConfig, AutoTokenizer, TFAutoModel, TFAutoModelForSequenceClassification, AdamWeightDecay
 from transformers.optimization_tf import create_optimizer
 
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
@@ -53,9 +54,9 @@ def argparser():
     ap = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
     ap.add_argument('--model_name', default=None,
                     help='pretrained model name')
-    ap.add_argument('--train', metavar='FILE', required=True,
+    ap.add_argument('--train', metavar='FILE', required=False,
                     help='training data')
-    ap.add_argument('--dev', metavar='FILE', required=True,
+    ap.add_argument('--dev', metavar='FILE', required=False,
                     help='development data')
     ap.add_argument('--test', metavar='FILE', required=False,
                     help='test data', default=None)
@@ -69,6 +70,8 @@ def argparser():
                     help='batch size for training')
     ap.add_argument('--epochs', metavar='INT', type=int, default=1,
                     help='number of training epochs')
+    ap.add_argument('--epoch_len', metavar='INT', type=int, default=None,
+                    help='override epoch length with data generator')
     ap.add_argument('--lr', '--learning_rate', metavar='FLOAT', type=float,
                     default=DEFAULT_LR, help='learning rate')
     ap.add_argument('--seq_len', metavar='INT', type=int,
@@ -82,12 +85,20 @@ def argparser():
                     help='input file format')
     ap.add_argument('--multiclass', default=False, action='store_true',
                     help='task has exactly one label per text')
-    ap.add_argument('--output_file', default=None, metavar='FILE',
+    ap.add_argument('--save_model', default=None, metavar='FILE',
                     help='save model to file')
-    ap.add_argument('--save_predictions', default=False, action='store_true',
+    ap.add_argument('--save_weights', default=None, metavar='FILE',
+                    help='save model weights to file')
+    ap.add_argument('--save_predictions', default=None, metavar='FILE',
                     help='save predictions and labels for dev set, or for test set if provided')
+    #ap.add_argument('--save_predictions', default=False, action='store_true',
+    #                help='save predictions and labels for dev set, or for test set if provided')
     ap.add_argument('--load_model', default=None, metavar='FILE',
                     help='load model from file')
+    ap.add_argument('--load_weights', default=None, metavar='FILE',
+                    help='load model weights from file')
+    ap.add_argument('--threshold', metavar='FLOAT', type=float, default=None,
+                    help='fixed threshold for multilabel prediction')
     ap.add_argument('--log_file', default="train.log", metavar='FILE',
                     help='log parameters and performance to file')
     ap.add_argument('--test_log_file', default="test.log", metavar='FILE',
@@ -112,6 +123,51 @@ def load_pretrained(options):
     return model, tokenizer, config
 
 
+def load_trained_model(directory):
+    config = AutoConfig.from_pretrained(directory)
+    tokenizer = AutoTokenizer.from_pretrained(
+        directory,
+        config=config
+    )
+    model = load_model(
+        os.path.join(directory, 'model.hdf5'),
+        custom_objects=get_custom_objects()
+    )
+    labels = []
+    with open(os.path.join(directory, 'labels.txt')) as f:
+        for ln, l in enumerate(f, start=1):
+            labels.append(l.rstrip('\n'))
+    return model, tokenizer, labels, config
+
+
+def get_pretrained_model_main_layer(model):
+    # Transformers doesn't support saving models wrapped in keras
+    # (https://github.com/huggingface/transformers/issues/2733) at the
+    # time of this writing. As a workaround, use the main layer
+    # instead of the model. As the main layer has different names for
+    # different models (TFBertModel.bert, TFRobertaModel.roberta,
+    # etc.), this has to check which model we're dealing with.
+    from transformers import TFBertModel, TFRobertaModel
+
+    if isinstance(model, TFBertModel):
+        return model.bert
+    elif isinstance(model, TFRobertaModel):
+        return model.roberta
+    else:
+        raise NotImplementedError(f'{model.__class__.__name__}')
+
+
+@timed
+def save_trained_model(directory, model, tokenizer, labels, config):
+    makedirs(directory, exist_ok=True)
+    model.save(join_path(directory, 'model.hdf5'))
+    config.save_pretrained(directory)
+    tokenizer.save_pretrained(directory)
+    with open(join_path(directory, 'labels.txt'), 'w') as out:
+        for label in labels:
+            print(label, file=out)
+
+
 def get_optimizer(num_train_examples, options):
     steps_per_epoch = math.ceil(num_train_examples / options.batch_size)
     num_train_steps = steps_per_epoch * options.epochs
@@ -133,6 +189,9 @@ def get_optimizer(num_train_examples, options):
 
 
 def build_classifier(pretrained_model, num_labels, optimizer, options):
+    # workaround for lack of support for saving pretrained models
+    pretrained_model = get_pretrained_model_main_layer(pretrained_model)
+
     seq_len = options.seq_len
     input_ids = Input(
         shape=(seq_len,), dtype='int32', name='input_ids')
@@ -156,12 +215,9 @@ def build_classifier(pretrained_model, num_labels, optimizer, options):
         output = Dense(num_labels, activation='sigmoid')(pooled_output)
         loss = BinaryCrossentropy()
         metrics = [
-            #F1Score(name='f1_th0.3', num_classes=num_labels, average='micro', threshold=0.3),
-            F1Score(name='f1_th0.4', num_classes=num_labels, average='micro', threshold=0.4)#,
-            #F1Score(name='f1_th0.5', num_classes=num_labels, average='micro', threshold=0.5),
-            #AUC(name='auc', multi_label=True)
+            F1Score(name='f1_th0.5', num_classes=num_labels, average='micro', threshold=0.5)
         ]
-    #output = pretrained_outputs # test
+
     model = Model(
         inputs=inputs,
         outputs=[output]
@@ -193,11 +249,12 @@ def load_data(fn, options, max_chars=None):
 
 
 class DataGenerator(Sequence):
-    def __init__(self, data_path, tokenize_func, options, bg_data_path=None, bg_sample_rate=1., max_chars=None, label_encoder=None):
+    """ Data generator for sampling from a main and any number of background corpora, e.g. uniformly from multiple languages. """
+    def __init__(self, data_path, tokenize_func, options, bg_data_path=None, bg_sample_rate=1., max_chars=None, label_encoder=None, epoch_len=None):
         texts, labels = load_data(data_path, options, max_chars=max_chars)
         self.num_examples = len(texts)
         self.batch_size = options.batch_size
-        #self.seq_len = options.seq_len
+        self.epoch_len = epoch_len
         self.X = tokenize_func(texts)
 
         if label_encoder is None:
@@ -232,7 +289,7 @@ class DataGenerator(Sequence):
         self.indexes = np.arange(self.num_examples)
         np.random.shuffle(self.indexes)
 
-        if self.bg_sample_rate > 0:
+        if self.bg_num_corpora > 0:# and self.bg_sample_rate > 0:
             if hasattr(self, "bg_indexes"):
                 for i, bg_indexes in enumerate(self.bg_indexes):
                     seen_bg_idxs = bg_indexes[:len(self.indexes)]
@@ -248,10 +305,17 @@ class DataGenerator(Sequence):
 
 
     def __len__(self):
-        return int((self.num_examples//self.batch_size)*(1+self.bg_sample_rate)) * self.bg_num_corpora
+        if self.epoch_len is not None:
+            return self.epoch_len
+        else:
+            return int((self.num_examples//self.batch_size)*(1+self.bg_sample_rate)) * self.bg_num_corpora
 
     def __getitem__(self, index):
-        if np.random.random() <= 1/(self.bg_sample_rate+self.bg_num_corpora):
+        try:
+            limit = 1/(self.bg_sample_rate+self.bg_num_corpora)
+        except ZeroDivisionError:
+            limit = 1.0
+        if np.random.random() <= limit or self.bg_num_corpora == 0:
             batch_indexes = self.indexes[self.index*self.batch_size:(self.index+1)*self.batch_size]
             self.index += 1
             X, Y = self.X, self.Y
@@ -318,7 +382,8 @@ def optimize_threshold(model, train_X, train_Y, test_X, test_Y, options=None, ep
 
     best_f1 = 0.
     print("Optimizing threshold...\nThres.\tPrec.\tRecall\tF1")
-    for threshold in np.arange(0.1, 0.9, 0.05):
+    # Test 0.5, 0.55, 0.45...
+    for threshold in [0.5+((i+1)//2)/20.*(i%2*2-1) for i in range(9)]: #np.arange(0.3, 0.7, 0.05):
         labels_pred = lil_matrix(labels_prob.shape, dtype='b')
         labels_pred[labels_prob>=threshold] = 1
         precision, recall, f1, _ = precision_recall_fscore_support(train_Y, labels_pred, average="micro")
@@ -364,8 +429,7 @@ def optimize_threshold(model, train_X, train_Y, test_X, test_Y, options=None, ep
         return test_f1, best_f1_threshold, test_labels_pred
 
 
-
-def test_threshold(model, test_X, test_Y, threshold=0.4, options=None, epoch=None):
+def test_threshold(model, test_X, test_Y, threshold=0.4, options=None, epoch=None, return_auc=False, save_pred_to=None):
     test_labels_prob = model.predict(test_X, verbose=1)#, batch_size=options.batch_size)
     test_labels_pred = lil_matrix(test_labels_prob.shape, dtype='b')
     test_labels_pred[test_labels_prob>=threshold] = 1
@@ -375,7 +439,24 @@ def test_threshold(model, test_X, test_Y, threshold=0.4, options=None, epoch=Non
     else:
         epoch_str = ""
     print("\nValidation/Test performance at threshold %.2f%s: Prec. %.4f, Recall %.4f, F1 %.4f" % (threshold, epoch_str, test_precision, test_recall, test_f1))
-    return test_f1, threshold, test_labels_pred
+
+    if save_pred_to is not None:
+        if epoch is None:
+            print("Saving predictions to", save_pred_to+".*.npy")
+            np.save(save_pred_to+".preds.npy", test_labels_pred.toarray())
+            np.save(save_pred_to+".gold.npy", test_Y)
+            #np.save(save_pred_to+".class_labels.npy", label_encoder.classes_)
+        else:
+            print("Saving predictions to", save_pred_to+"-epoch%d.*.npy" % epoch)
+            np.save(save_pred_to+"-epoch%d.preds.npy" % epoch, test_labels_pred.toarray())
+            np.save(save_pred_to+"-epoch%d.gold.npy" % epoch, test_Y)
+            #np.save(save_pred_to+"-epoch%d.class_labels.npy" % epoch, label_encoder.classes_)
+
+    if return_auc:
+        auc = roc_auc_score(test_Y, test_labels_prob, average = 'micro')
+        return test_f1, threshold, test_labels_pred, auc
+    else:
+        return test_f1, threshold, test_labels_pred
 
 
 def test_auc(model, test_X, test_Y):
@@ -406,24 +487,34 @@ class Logger:
 
 
 class EvalCallback(Callback):
-    def __init__(self, model, train_X, train_Y, dev_X, dev_Y, test_X=None, test_Y=None, logfile="train.log", test_logfile=None, save_pred_to=None, params={}, patience=None, save_model_to=None):
+    def __init__(self, model, train, dev, test=None, logfile="train.log", test_logfile=None, save_pred_to=None, params={}, patience=None, save_model_to=None, th_opt_train_batches=200, min_improvement=0.0, threshold=None):
         self.model = model
-        self.train_X = train_X
-        self.train_Y = train_Y
-        assert type(dev_X) == type(dev_Y)
-        if type(dev_X) is list:
-            self.dev_X = dev_X
-            self.dev_Y = dev_Y
+        #self.train_X = train_X
+        #self.train_Y = train_Y
+        self.train_X = {}
+        self.train_Y = None
+        for i, elem in enumerate(train): # Generate train sub set for optimizing threshold
+            if i >= th_opt_train_batches:
+                break
+            x, y = elem
+            for k in x:
+                if k not in self.train_X:
+                    self.train_X[k] = x[k]
+                else:
+                    self.train_X[k] = np.append(self.train_X[k], x[k], axis=0)
+            if self.train_Y is None:
+                self.train_Y = y
+            else:
+                self.train_Y = np.append(self.train_Y, y, axis=0)
+
+        self.dev_X, self.dev_Y = dev
+        if test is None:
+            self.test_X, self.test_Y = None, None
         else:
-            self.dev_X = [dev_X]
-            self.dev_Y = [dev_Y]
-        assert type(test_X) == type(test_Y)
-        if type(test_X) is list or test_X is None:
-            self.test_X = test_X
-            self.test_Y = test_Y
-        else:
-            self.test_X = [test_X]
-            self.test_Y = [test_Y]
+            if type(test) is list or type(test) is tuple:
+                self.test_X, self.test_Y = test
+            else:
+                self.test_X, self.test_Y = [test[0]], [test[1]]
 
         self.logger = Logger(logfile, self.model, params)
         if test_logfile is not None:
@@ -437,31 +528,48 @@ class EvalCallback(Callback):
             self.save_model_to = save_model_to
         else:
             self.save_model_to = None
-        self.best_score = -1
+        self.best_f1 = -1
         self.patience = patience
         self.patience_left = patience
+        self.min_improvement = min_improvement
+        self.threshold = threshold
+        self.model.best_f1 = -1
+        self.model.best_auc = -1
 
     def on_epoch_end(self, epoch, logs={}):
-        for i, dev_X in enumerate(self.dev_X):
-            print("\nPerformance on validation set %d:" % i)
-            # TODO: sample train_X from generator for optimize_threshold()
-            logs['f1'], _, _, logs['rocauc'] = optimize_threshold(self.model, self.train_X, self.train_Y, self.dev_X, self.dev_Y, epoch=epoch, return_auc=True)
-            #logs['rocauc'] = test_auc(self.model, self.dev_X, self.dev_Y)
-            print("AUC dev:", logs['rocauc'])
+        print("\nPerformance on validation set:")
+
+        if self.threshold is None:
+            logs['f1'], dev_th, _, logs['rocauc'] = optimize_threshold(self.model, self.train_X, self.train_Y, self.dev_X, self.dev_Y, epoch=epoch, return_auc=True)
+        else:
+            logs['f1'], _, _, logs['rocauc'] = test_threshold(self.model, self.dev_X, self.dev_Y, epoch=epoch, return_auc=True, threshold=self.threshold)
+
+        #logs['rocauc'] = test_auc(self.model, self.dev_X, self.dev_Y)
+        print("AUC dev:", logs['rocauc'])
 
         if self.test_X is not None:
-            for i, test_X in enumerate(self.test_X):
-                print("\nPerformance on test set %d:" % i)
-                test_f1, _, _, test_auc_score = optimize_threshold(self.model, self.train_X, self.train_Y, self.test_X, self.test_Y, epoch=epoch, save_pred_to=self.save_pred_to, return_auc=True)
-                #test_auc_score = test_auc(self.model, self.test_X, self.test_Y)
-                print("AUC test:", test_auc_score)
-            else:
-                test_f1, test_auc_score = None, None
+            for test_i, (test_X, test_Y) in enumerate(zip(self.test_X, self.test_Y)):
+                print("\nPerformance on test set %d:" % test_i)
+                try:
+                    if self.threshold is None:
+                        #test_f1, _, _, test_auc_score = optimize_threshold(self.model, self.train_X, self.train_Y, test_X, test_Y, epoch=epoch, save_pred_to=self.save_pred_to, return_auc=True)
+                        test_f1, test_th, test_pred, test_auc_score = test_threshold(self.model, test_X, test_Y, threshold=dev_th, return_auc=True)
+                        print("Test F1:", test_f1)
+                    else:
+                        test_f1, _, _, test_auc_score = test_threshold(self.model, self.dev_X, self.dev_Y, epoch=epoch, return_auc=True, threhold=self.threshold)
+                    #test_auc_score = test_auc(self.model, self.test_X, self.test_Y)
+                    print("AUC test:", test_auc_score)
+                except:
+                    print("Evaluation on test set failed.")
+                    test_f1, test_auc_score = np.nan, np.nan
+        else:
+            test_f1, test_auc_score = None, None
 
-        # TODO: implement early stopping and logging for multiple dev/test sets
-        if logs['f1'] > self.best_score:
+        if logs['f1'] > self.best_f1 + self.min_improvement:
             print("F1 score improved.")
             self.best_f1 = logs['f1']
+            self.model.best_f1 = logs['f1']
+            self.model.best_auc = logs['rocauc']
             self.best_score_epoch = epoch
             self.best_score_logs = logs
             self.best_test_f1 = test_f1
@@ -471,6 +579,8 @@ class EvalCallback(Callback):
                 try:
                     print("Saving weights to", self.save_model_to)
                     self.model.save_weights(self.save_model_to)
+                    #print("Saving model to", self.save_model_to+'.model')
+                    #self.model.save(options.load_model+'.model')
                 except:
                     pass
             if self.patience is not None:
@@ -507,7 +617,7 @@ class EvalCallback(Callback):
 
     def on_train_end(self, logs):
         if self.flush_log_after_max_epochs:
-            self.logger.record(self.final_epoch, logs)
+            self.logger.record(self.final_epoch, self.best_score_logs)
             if self.test_X is not None:
                 self.test_logger.record(self.final_epoch, self.test_logs)
 
@@ -516,13 +626,16 @@ def main(argv):
     init_tf_memory()
     options = argparser().parse_args(argv[1:])
 
-    ### Load data without generator
-    train_texts, train_labels = load_data(options.train, options, max_chars=25000)
-    dev_data = [load_data(path, options, max_chars=25000) for path in options.dev.split()]
-    #dev_texts, dev_labels = load_data(options.dev, options, max_chars=25000)
+    ## TODO: Remove threshols optimization functionality completely?
+    ### Load data without generator (needed for threshold optimization)
+    if options.train is not None:
+        train_texts, train_labels = load_data(options.train, options, max_chars=25000)
+    #dev_data = [load_data(path, options, max_chars=25000) for path in options.dev.split()]
+    if options.dev is not None:
+        dev_texts, dev_labels = load_data(options.dev, options, max_chars=25000)
     if options.test is not None:
         #test_texts, test_labels = load_data(options.test, options, max_chars=25000)
-        test_data = [load_data(path, options, max_chars=25000) for path in options.test.split()]
+        test_data = [load_data(path, options, max_chars=25000) for path in options.test.split(';')]
     #num_train_examples = len(train_texts)
 
     """classifier, tokenizer, optimizer = prepare_classifier(
@@ -535,11 +648,13 @@ def main(argv):
     pretrained_model, tokenizer, model_config = load_pretrained(options)
     tokenize = make_tokenization_function(tokenizer, options)
 
-    train_X = tokenize(train_texts)
-    #dev_X = tokenize(dev_texts)
-    dev_Xs = [tokenize(dev_texts) for dev_texts, _ in dev_data]
+    if options.train is not None:
+        train_X = tokenize(train_texts)
+    if options.dev is not None:
+        dev_X = tokenize(dev_texts)
+    #dev_Xs = [tokenize(dev_texts) for dev_texts, _ in dev_data]
 
-    options.test = None # TODO: adapt generator to test set (?)
+    #options.test = None # TODO: adapt generator to test set (?)
     if options.test is not None:
         #test_X = tokenize(test_texts)
         test_Xs = [tokenize(test_texts) for test_texts, _ in test_data]
@@ -547,7 +662,7 @@ def main(argv):
     if options.bg_train is None:
         train_gen = DataGenerator(options.train, tokenize, options, max_chars=25000)
     else:
-        train_gen = DataGenerator(options.train, tokenize, options, max_chars=25000, bg_data_path=options.bg_train, bg_sample_rate=options.bg_sample_rate)
+        train_gen = DataGenerator(options.train, tokenize, options, max_chars=25000, bg_data_path=options.bg_train, bg_sample_rate=options.bg_sample_rate, epoch_len=options.epoch_len)
     #dev_gen = DataGenerator(options.dev, tokenize, options, max_chars=25000, label_encoder=train_gen.label_encoder)
 
     optimizer = get_optimizer(train_gen.num_examples*(1+train_gen.bg_sample_rate*train_gen.bg_num_corpora), options)
@@ -562,9 +677,12 @@ def main(argv):
     label_encoder.fit(train_labels)
     train_Y = label_encoder.transform(train_labels)
     dev_Y = label_encoder.transform(dev_labels)"""
-    train_Y = train_gen.label_encoder.transform(train_labels)
-    #dev_Y = train_gen.label_encoder.transform(dev_labels)
-    dev_Ys = [train_gen.label_encoder.transform(dev_labels) for _, dev_labels in dev_data]
+    if options.train is not None:
+        train_Y = train_gen.label_encoder.transform(train_labels)
+    if options.dev is not None:
+        dev_Y = train_gen.label_encoder.transform(dev_labels)
+
+    #dev_Ys = [train_gen.label_encoder.transform(dev_labels) for _, dev_labels in dev_data]
     if options.test is not None:
         #test_Y = label_encoder.transform(test_labels)
         #test_Y = train_gen.label_encoder.transform(test_labels)
@@ -572,17 +690,36 @@ def main(argv):
 
     #num_labels = len(label_encoder.classes_)
 
-    if options.load_model is not None:
+    if options.load_weights is not None:
+        print("Loading weights from", options.load_weights)
         classifier.load_weights(options.load_model)
+    elif options.load_model is not None:
+        print("Loading model from", options.load_model)
+        classifier, tokenizer, labels, config = load_trained_model(options.load_model)
 
-        print("Evaluating on dev set...")
-        f1, th, dev_pred = optimize_threshold(classifier, train_X, train_Y, dev_X, dev_Y, options)
-        print("AUC dev:", test_auc(classifier, dev_X, dev_Y))
+    if options.train is None:
+        assert (options.load_weights is not None or options.load_model is not None) and options.train is None
+        # Evaluate only when no train data is passed
+
+        if options.dev is not None:
+            print("Evaluating on dev set...")
+            if options.threshold is None:
+                f1, th, dev_pred = optimize_threshold(classifier, train_X, train_Y, dev_X, dev_Y, options)
+            else:
+                f1, th, dev_pred = test_threshold(classifier, dev_X, dev_Y, threshold=options.threshold)
+            print("AUC dev:", test_auc(classifier, dev_X, dev_Y))
 
         if options.test is not None:
             print("Evaluating on test set...")
-            test_f1, test_th, test_pred = optimize_threshold(classifier, train_X, train_Y, test_X, test_Y, options, save_pred_to=options.load_model)
-            np.save(options.load_model+".class_labels.npy", label_encoder.classes_)
+            if options.threshold is None:
+                test_f1, test_th, test_pred = optimize_threshold(classifier, train_X, train_Y, test_X, test_Y, options, save_pred_to=options.load_model)
+            else:
+                for i in range(len(test_Xs)):
+                    print("  %d" % i)
+                    test_X, test_Y = test_Xs[i], test_Ys[i]
+                    test_f1, test_th, test_pred = test_threshold(classifier, test_X, test_Y, threshold=options.threshold, save_pred_to=options.load_model)
+
+            np.save(options.save_predictions+".class_labels.npy", train_gen.label_encoder.classes_) ## TODO: move? train_gen dep?
             #test_f1, test_th, test_pred = optimize_threshold(classifier, train_X, train_Y, test_X, test_Y, options)
             print("AUC test:", test_auc(classifier, test_X, test_Y))
 
@@ -590,24 +727,29 @@ def main(argv):
         return
 
 
-    callbacks = [] #[ModelCheckpoint(options.output_file+'.{epoch:02d}', save_weights_only=True)]
-    if options.test is not None and options.test_log_file is not None:
-        print("Initializing evaluation with dev and test set...")
-        callbacks.append(EvalCallback(classifier, train_X, train_Y, dev_Xs, dev_Ys, test_X=test_Xs, test_Y=test_Ys,
-                                    patience=5,
-                                    logfile=options.log_file,
-                                    test_logfile=options.test_log_file,
-                                    save_pred_to=options.output_file,
-                                    save_model_to=options.output_file,
-                                    params={'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size}))
+    callbacks = [] #[ModelCheckpoint(options.save_weights+'.{epoch:02d}', save_weights_only=True)]
+    if options.threshold is None:
+        if options.test is not None and options.test_log_file is not None:
+            print("Initializing evaluation with dev and test set...")
+            callbacks.append(EvalCallback(classifier, train_gen, (dev_X, dev_Y), test=(test_Xs, test_Ys),
+                                        patience=5,
+                                        threshold=options.threshold,
+                                        logfile=options.log_file,
+                                        test_logfile=options.test_log_file,
+                                        save_pred_to=options.save_predictions,
+                                        save_model_to=options.save_weights,
+                                        params={'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size}))
+        else:
+            print("Initializing evaluation with dev set...")
+            callbacks.append(EvalCallback(classifier, train_gen, (dev_X, dev_Y),
+                                        patience=5,
+                                        threshold=options.threshold,
+                                        logfile=options.log_file,
+                                        save_model_to=options.save_weights,
+                                        params={'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size}))
     else:
-        print("Initializing evaluation with dev set...")
-        callbacks.append(EvalCallback(classifier, train_X, train_Y, dev_Xs, dev_Ys,
-                                    patience=5,
-                                    logfile=options.log_file,
-                                    save_model_to=options.output_file,
-                                    params={'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size}))
-    #callbacks.append(EarlyStopping(monitor="val_f1_th0.4", verbose=2, patience=5, mode="max"))
+        print("Initializing early stopping criterion...")
+        callbacks.append(EarlyStopping(monitor="val_f1_th0.5", verbose=1, patience=5, mode="max", restore_best_weights=True))
 
     """history = classifier.fit(
         train_X,
@@ -618,22 +760,61 @@ def main(argv):
         callbacks=callbacks
     )
     """
-    history = classifier.fit(
-        train_gen,
-        #steps_per_epoch=len(train_gen),
-        validation_data=(dev_X, dev_Y), #dev_gen,
-        initial_epoch=0,
-        epochs=options.epochs,
-        callbacks=callbacks
-    )
+    if options.train is not None:
+        history = classifier.fit(
+            train_gen,
+            #steps_per_epoch=len(train_gen),
+            validation_data=(dev_X, dev_Y), #dev_gen,
+            initial_epoch=0,
+            epochs=options.epochs,
+            callbacks=callbacks
+        )
 
+        if options.save_model is not None:
+            print("Saving model to %s" % options.save_model)
+            # Save complete model
+            save_trained_model(options.save_model, classifier, tokenizer, train_gen.label_encoder.classes_, model_config)
+
+        if options.save_weights is not None:
+            print("Saving weights to %s" % options.save_weights)
+            # Save weights only
+            classifier.save_weights(options.save_weights, save_format='h5')
 
     """try:
-        if options.output_file:
-            print("Saving model to %s" % options.output_file)
-            classifier.save_weights(options.output_file)
+        print("Best F1 during training:", max(history.history['val_f1_th0.5']))
     except:
-        pass
+        pass"""
+    #print("Best AUC during training:", classifier.best_auc)
+    #classifier = load_model(options.load_model+'.model')
+
+    if options.threshold is not None:
+        f1, _, _, rocauc = test_threshold(classifier, dev_X, dev_Y, return_auc=True, threshold=options.threshold)
+        print("Restored best checkpoint, F1: %.6f, AUC: %.6f" % (f1, rocauc))
+
+        logger = Logger(options.log_file, None, {'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size})
+        logger.record(len(history.history['loss'])-1, {'f1': f1, 'rocauc': rocauc})
+
+        if options.test is not None:
+            for i, (test_X, test_Y) in enumerate(zip(test_Xs, test_Ys)):
+                test_log_file = options.test_log_file.split(';')[i]
+                print("Evaluating on test set %d..." % i)
+                test_f1, test_th, test_pred, test_rocauc = test_threshold(classifier, test_X, test_Y, threshold=options.threshold, return_auc=True)
+                print("AUC test:", test_rocauc)
+                print("Logging to", test_log_file)
+                test_logger = Logger(options.test_log_file.split(';')[i], None, {'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size})
+                test_logger.record(len(history.history['loss'])-1, {'f1': test_f1, 'rocauc': test_rocauc})
+
+
+    ## Rebuild model and reload weights
+    """
+    del classifier
+    h5_classifier = build_classifier(pretrained_model, train_gen.num_labels, optimizer, options)
+    h5_classifier.load_weights(options.output_file)
+    if options.threshold is not None:
+        f1, _, _, rocauc = test_threshold(h5_classifier, dev_X, dev_Y, return_auc=True, threshold=options.threshold)
+    else:
+        f1, _, _, rocauc = optimize_threshold(h5_classifier, train_X, train_Y, dev_X, dev_Y, options, return_auc=True)
+    print("Loaded h5 model F1: %.6f, AUC: %.6f" % (f1, rocauc))
     """
     return 0
 
