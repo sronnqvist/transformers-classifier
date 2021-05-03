@@ -130,11 +130,11 @@ def load_trained_model(directory):
         config=config
     )
     model = load_model(
-        os.path.join(directory, 'model.hdf5'),
+        join_path(directory, 'model.hdf5'),
         custom_objects=get_custom_objects()
     )
     labels = []
-    with open(os.path.join(directory, 'labels.txt')) as f:
+    with open(join_path(directory, 'labels.txt')) as f:
         for ln, l in enumerate(f, start=1):
             labels.append(l.rstrip('\n'))
     return model, tokenizer, labels, config
