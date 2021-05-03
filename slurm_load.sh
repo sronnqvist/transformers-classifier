@@ -60,6 +60,7 @@ echo "Settings: src=$SRC trg=$TRG bg=$BG model=$MODEL lr=$LR epochs=$EPOCHS batc
 srun python train.py \
   --model_name $MODEL \
   --load_weights "$2" \
+  --train $TRAIN_DIR/train.tsv \
   --dev $DEV_DIR/dev.tsv \
   --test $DEV_DIR/test.tsv \
   --bg_train "$BG_FILES" \
@@ -68,6 +69,7 @@ srun python train.py \
   --threshold 0.5 \
   --seq_len 512 \
   --batch_size $BS \
+  --epochs 0 \
   --save_predictions "$OUTPUT_DIR/pred_$MODEL_ALIAS-0.5_$BG $SRC-$TRG-$i-$LR"
 
 
