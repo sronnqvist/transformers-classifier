@@ -123,6 +123,16 @@ def load_pretrained(options):
     return model, tokenizer, config
 
 
+def get_custom_objects():
+    """Return dictionary of custom objects required for load_model."""
+    from transformers import AdamWeightDecay
+    from tensorflow_addons.metrics import F1Score
+    return {
+        'AdamWeightDecay': AdamWeightDecay,
+        'F1Score': F1Score,
+    }
+
+
 def load_trained_model(directory):
     config = AutoConfig.from_pretrained(directory)
     tokenizer = AutoTokenizer.from_pretrained(
@@ -251,20 +261,13 @@ def load_data(fn, options, max_chars=None):
 class DataGenerator(Sequence):
     """ Data generator for sampling from a main and any number of background corpora, e.g. uniformly from multiple languages. """
     def __init__(self, data_path, tokenize_func, options, bg_data_path=None, bg_sample_rate=1., max_chars=None, label_encoder=None, epoch_len=None):
+        ## Load data
         texts, labels = load_data(data_path, options, max_chars=max_chars)
         self.num_examples = len(texts)
         self.batch_size = options.batch_size
         self.epoch_len = epoch_len
         self.X = tokenize_func(texts)
-
-        if label_encoder is None:
-            self.label_encoder = MultiLabelBinarizer()
-            self.label_encoder.fit(labels)
-        else:
-            self.label_encoder = label_encoder
-
-        self.Y = self.label_encoder.transform(labels)
-        self.num_labels = len(self.label_encoder.classes_)
+        all_labels = labels
 
         if bg_data_path is not None:
             self.bg_sample_rate = bg_sample_rate
@@ -273,8 +276,22 @@ class DataGenerator(Sequence):
                 bg_texts, bg_labels = load_data(path, options, max_chars=max_chars)
                 self.bg_num_examples.append(len(bg_texts))
                 self.bg_X.append(tokenize_func(bg_texts))
+                all_labels += bg_labels
+                self.bg_Y.append(bg_labels)
 
-                self.bg_Y.append(self.label_encoder.transform(bg_labels))
+        ## Init label encoder
+        if label_encoder is None:
+            self.label_encoder = MultiLabelBinarizer()
+            self.label_encoder.fit(all_labels)
+        else:
+            self.label_encoder = label_encoder
+
+        self.Y = self.label_encoder.transform(labels)
+        self.num_labels = len(self.label_encoder.classes_)
+
+        if bg_data_path is not None:
+            self.bg_Y = [self.label_encoder.transform(y) for y in self.bg_Y]
+
             #self.bg_num_labels = len(self.label_encoder.classes_)
             self.bg_num_corpora = len(self.bg_num_examples)
         else:
@@ -760,7 +777,7 @@ def main(argv):
         callbacks=callbacks
     )
     """
-    if options.train is not None:
+    if options.train is not None and options.dev is not None:
         history = classifier.fit(
             train_gen,
             #steps_per_epoch=len(train_gen),
@@ -788,11 +805,16 @@ def main(argv):
     #classifier = load_model(options.load_model+'.model')
 
     if options.threshold is not None:
-        f1, _, _, rocauc = test_threshold(classifier, dev_X, dev_Y, return_auc=True, threshold=options.threshold)
-        print("Restored best checkpoint, F1: %.6f, AUC: %.6f" % (f1, rocauc))
+        if options.dev is not None:
+            f1, _, _, rocauc = test_threshold(classifier, dev_X, dev_Y, return_auc=True, threshold=options.threshold)
+            print("Restored best checkpoint, F1: %.6f, AUC: %.6f" % (f1, rocauc))
 
-        logger = Logger(options.log_file, None, {'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size})
-        logger.record(len(history.history['loss'])-1, {'f1': f1, 'rocauc': rocauc})
+            logger = Logger(options.log_file, None, {'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size})
+            try:
+                epoch = len(history.history['loss'])-1
+            except:
+                epoch = -1
+            logger.record(epoch, {'f1': f1, 'rocauc': rocauc})
 
         if options.test is not None:
             for i, (test_X, test_Y) in enumerate(zip(test_Xs, test_Ys)):
@@ -802,7 +824,11 @@ def main(argv):
                 print("AUC test:", test_rocauc)
                 print("Logging to", test_log_file)
                 test_logger = Logger(options.test_log_file.split(';')[i], None, {'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size})
-                test_logger.record(len(history.history['loss'])-1, {'f1': test_f1, 'rocauc': test_rocauc})
+                try:
+                    epoch = len(history.history['loss'])-1
+                except:
+                    epoch = -1
+                test_logger.record(epoch, {'f1': test_f1, 'rocauc': test_rocauc})
 
 
     ## Rebuild model and reload weights
