@@ -32,7 +32,8 @@ def parse_fasttext_line(l, label_string='__label__'):
 def parse_tsv_line(l):
     fields = l.split('\t')
     labels, text = fields
-    labels = labels.split()
+    labels = labels.upper().split()
+    #labels = [l for l in labels.split() if l.isupper()]
     return text, labels
 
 
