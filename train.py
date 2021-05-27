@@ -97,6 +97,8 @@ def argparser():
                     help='load model from file')
     ap.add_argument('--load_weights', default=None, metavar='FILE',
                     help='load model weights from file')
+    ap.add_argument('--load_labels', default=None, metavar='FILE',
+                    help='load labels from file')
     ap.add_argument('--threshold', metavar='FLOAT', type=float, default=None,
                     help='fixed threshold for multilabel prediction')
     ap.add_argument('--log_file', default="train.log", metavar='FILE',
@@ -267,6 +269,8 @@ class DataGenerator(Sequence):
         self.batch_size = options.batch_size
         self.epoch_len = epoch_len
         self.X = tokenize_func(texts)
+        assert self.X['attention_mask'].min() >= 0
+        assert self.X['attention_mask'].max() <= 1
         all_labels = labels
 
         if bg_data_path is not None:
@@ -276,21 +280,36 @@ class DataGenerator(Sequence):
                 bg_texts, bg_labels = load_data(path, options, max_chars=max_chars)
                 self.bg_num_examples.append(len(bg_texts))
                 self.bg_X.append(tokenize_func(bg_texts))
+                for bg_x in self.bg_X:
+                    assert bg_x['attention_mask'].min() >= 0
+                    assert bg_x['attention_mask'].max() <= 1
                 all_labels += bg_labels
                 self.bg_Y.append(bg_labels)
 
         ## Init label encoder
         if label_encoder is None:
             self.label_encoder = MultiLabelBinarizer()
-            self.label_encoder.fit(all_labels)
+            if options.load_labels is None:
+                self.label_encoder.fit(all_labels)
+            else:
+                label_set = [[l.strip()] for l in open(options.load_labels).readlines() if l]
+                self.label_encoder.fit(label_set)
+            #print("Classes:", self.label_encoder.classes_)
+            print("Number of classes:", len(self.label_encoder.classes_))
         else:
             self.label_encoder = label_encoder
 
         self.Y = self.label_encoder.transform(labels)
         self.num_labels = len(self.label_encoder.classes_)
+        assert self.Y.max() < self.num_labels
+        assert self.Y.min() >= 0
 
         if bg_data_path is not None:
             self.bg_Y = [self.label_encoder.transform(y) for y in self.bg_Y]
+            for bg_y in self.bg_Y:
+                assert bg_y.max() < self.num_labels
+                assert bg_y.min() >= 0
+
 
             #self.bg_num_labels = len(self.label_encoder.classes_)
             self.bg_num_corpora = len(self.bg_num_examples)
@@ -320,12 +339,12 @@ class DataGenerator(Sequence):
 
         self.index = 0
 
-
     def __len__(self):
         if self.epoch_len is not None:
             return self.epoch_len
         else:
-            return int((self.num_examples//self.batch_size)*(1+self.bg_sample_rate)) * self.bg_num_corpora
+            #return int((self.num_examples//self.batch_size)*(1+self.bg_sample_rate)) * self.bg_num_corpora
+            return int((self.num_examples//self.batch_size) * (self.bg_sample_rate*(1+self.bg_num_corpora)))
 
     def __getitem__(self, index):
         try:
@@ -334,13 +353,22 @@ class DataGenerator(Sequence):
             limit = 1.0
         if np.random.random() <= limit or self.bg_num_corpora == 0:
             batch_indexes = self.indexes[self.index*self.batch_size:(self.index+1)*self.batch_size]
+            if len(batch_indexes) < self.batch_size:
+                batch_indexes = np.concatenate([batch_indexes, self.indexes[:self.batch_size-len(batch_indexes)]])
+                end = ((self.index+1)*self.batch_size) % len(self.indexes)
+                if end < self.batch_size:
+                    end = self.batch_size
+                    beg = 0
+                else:
+                    beg = end-self.batch_size
+                batch_indexes = self.indexes[beg:end]
             self.index += 1
             X, Y = self.X, self.Y
         else:
             i = np.random.randint(0, self.bg_num_corpora)
-            try:
-                batch_indexes = self.bg_indexes[i][self.index*self.batch_size:(self.index+1)*self.batch_size]
-            except IndexError:
+            batch_indexes = self.bg_indexes[i][self.index*self.batch_size:(self.index+1)*self.batch_size]
+
+            if len(batch_indexes) < self.batch_size:
                 end = ((self.index+1)*self.batch_size) % len(self.bg_indexes[i])
                 if end < self.batch_size:
                     end = self.batch_size
@@ -361,6 +389,8 @@ class DataGenerator(Sequence):
         for j, idx in enumerate(batch_indexes):
             batch_y[j] = Y[idx]
 
+        assert batch_y.max() < self.num_labels
+        assert batch_y.min() >= 0
         return batch_X, batch_y
 
 
