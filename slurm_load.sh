@@ -70,7 +70,8 @@ srun python train.py \
   --seq_len 512 \
   --batch_size $BS \
   --epochs 0 \
-  --save_predictions "$OUTPUT_DIR/pred_$MODEL_ALIAS-0.5_$BG $SRC-$TRG-$i-$LR"
+  --test_log_file "$3"
+#  --save_predictions "$OUTPUT_DIR/pred_$MODEL_ALIAS-0.5_$BG $SRC-$TRG-$i-$LR"
 
 
 #done
