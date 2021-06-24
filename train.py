@@ -101,6 +101,8 @@ def argparser():
                     help='load labels from file')
     ap.add_argument('--threshold', metavar='FLOAT', type=float, default=None,
                     help='fixed threshold for multilabel prediction')
+    ap.add_argument('--patience', metavar='INT', type=int, default=5,
+                    help='early-stopping patience')
     ap.add_argument('--log_file', default="train.log", metavar='FILE',
                     help='log parameters and performance to file')
     ap.add_argument('--test_log_file', default="test.log", metavar='FILE',
@@ -227,6 +229,7 @@ def build_classifier(pretrained_model, num_labels, optimizer, options):
         output = Dense(num_labels, activation='sigmoid')(pooled_output)
         loss = BinaryCrossentropy()
         metrics = [
+            F1Score(name='f1_th', num_classes=num_labels, average='micro', threshold=options.threshold),
             F1Score(name='f1_th0.5', num_classes=num_labels, average='micro', threshold=0.5)
         ]
 
@@ -314,7 +317,7 @@ class DataGenerator(Sequence):
             #self.bg_num_labels = len(self.label_encoder.classes_)
             self.bg_num_corpora = len(self.bg_num_examples)
         else:
-            self.bg_sample_rate = 0
+            self.bg_sample_rate = 1
             self.bg_num_examples = [0]
             self.bg_num_corpora = 0
 
@@ -675,7 +678,7 @@ def main(argv):
 
     ## TODO: Remove threshols optimization functionality completely?
     ### Load data without generator (needed for threshold optimization)
-    if options.train is not None:
+    if options.train is not None and options.threshold is None:
         train_texts, train_labels = load_data(options.train, options, max_chars=25000)
     #dev_data = [load_data(path, options, max_chars=25000) for path in options.dev.split()]
     if options.dev is not None:
@@ -695,7 +698,7 @@ def main(argv):
     pretrained_model, tokenizer, model_config = load_pretrained(options)
     tokenize = make_tokenization_function(tokenizer, options)
 
-    if options.train is not None:
+    if options.train is not None and options.threshold is None:
         train_X = tokenize(train_texts)
     if options.dev is not None:
         dev_X = tokenize(dev_texts)
@@ -707,7 +710,7 @@ def main(argv):
         test_Xs = [tokenize(test_texts) for test_texts, _ in test_data]
 
     if options.bg_train is None:
-        train_gen = DataGenerator(options.train, tokenize, options, max_chars=25000)
+        train_gen = DataGenerator(options.train, tokenize, options, max_chars=25000, epoch_len=options.epoch_len)
     else:
         train_gen = DataGenerator(options.train, tokenize, options, max_chars=25000, bg_data_path=options.bg_train, bg_sample_rate=options.bg_sample_rate, epoch_len=options.epoch_len)
     #dev_gen = DataGenerator(options.dev, tokenize, options, max_chars=25000, label_encoder=train_gen.label_encoder)
@@ -724,7 +727,7 @@ def main(argv):
     label_encoder.fit(train_labels)
     train_Y = label_encoder.transform(train_labels)
     dev_Y = label_encoder.transform(dev_labels)"""
-    if options.train is not None:
+    if options.train is not None and options.threshold is None:
         train_Y = train_gen.label_encoder.transform(train_labels)
     if options.dev is not None:
         dev_Y = train_gen.label_encoder.transform(dev_labels)
@@ -774,12 +777,13 @@ def main(argv):
         return
 
 
-    callbacks = [] #[ModelCheckpoint(options.save_weights+'.{epoch:02d}', save_weights_only=True)]
+    #callbacks = [ModelCheckpoint(options.save_weights+'.{epoch:02d}', save_weights_only=True)]
+    callbacks = [ModelCheckpoint(options.save_weights+'.{epoch:02d}', save_weights_only=True, save_best_only=True, verbose=1, monitor="val_f1_th", mode="max")]
     if options.threshold is None:
         if options.test is not None and options.test_log_file is not None:
             print("Initializing evaluation with dev and test set...")
             callbacks.append(EvalCallback(classifier, train_gen, (dev_X, dev_Y), test=(test_Xs, test_Ys),
-                                        patience=5,
+                                        patience=options.patience,
                                         threshold=options.threshold,
                                         logfile=options.log_file,
                                         test_logfile=options.test_log_file,
@@ -796,7 +800,7 @@ def main(argv):
                                         params={'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size}))
     else:
         print("Initializing early stopping criterion...")
-        callbacks.append(EarlyStopping(monitor="val_f1_th0.5", verbose=1, patience=5, mode="max", restore_best_weights=True))
+        callbacks.append(EarlyStopping(monitor="val_f1_th", verbose=1, patience=5, mode="max", restore_best_weights=True))
 
     """history = classifier.fit(
         train_X,
