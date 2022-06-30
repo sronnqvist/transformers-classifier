@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+##!/usr/bin/env python3
 
 import sys
 import math
@@ -230,7 +230,9 @@ def build_classifier(pretrained_model, num_labels, optimizer, options):
         loss = BinaryCrossentropy()
         metrics = [
             F1Score(name='f1_th', num_classes=num_labels, average='micro', threshold=options.threshold),
-            F1Score(name='f1_th0.5', num_classes=num_labels, average='micro', threshold=0.5)
+            F1Score(name='f1_th0.5', num_classes=num_labels, average='micro', threshold=0.5),
+            AUC(name='rocauc'),
+            AUC(name='prauc', curve='PR')
         ]
 
     model = Model(
@@ -473,7 +475,10 @@ def optimize_threshold(model, train_X, train_Y, test_X, test_Y, options=None, ep
             #np.save(save_pred_to+"-epoch%d.class_labels.npy" % epoch, label_encoder.classes_)
 
     if return_auc:
-        auc = roc_auc_score(test_Y, test_labels_prob, average = 'micro')
+        try:
+            auc = roc_auc_score(test_Y, test_labels_prob, average = 'micro')
+        except ValueError:
+            auc = 0
         return test_f1, best_f1_threshold, test_labels_pred, auc
     else:
         return test_f1, best_f1_threshold, test_labels_pred
@@ -503,7 +508,10 @@ def test_threshold(model, test_X, test_Y, threshold=0.4, options=None, epoch=Non
             #np.save(save_pred_to+"-epoch%d.class_labels.npy" % epoch, label_encoder.classes_)
 
     if return_auc:
-        auc = roc_auc_score(test_Y, test_labels_prob, average = 'micro')
+        try:
+            auc = roc_auc_score(test_Y, test_labels_prob, average = 'micro')
+        except ValueError:
+            auc = 0
         return test_f1, threshold, test_labels_pred, auc
     else:
         return test_f1, threshold, test_labels_pred
@@ -511,7 +519,10 @@ def test_threshold(model, test_X, test_Y, threshold=0.4, options=None, epoch=Non
 
 def test_auc(model, test_X, test_Y):
     labels_prob = model.predict(test_X, verbose=1)
-    return roc_auc_score(test_Y, labels_prob, average = 'micro')
+    try:
+        return roc_auc_score(test_Y, labels_prob, average = 'micro')
+    except ValueError:
+        return 0
 
 
 class Logger:
@@ -676,7 +687,7 @@ def main(argv):
     init_tf_memory()
     options = argparser().parse_args(argv[1:])
 
-    ## TODO: Remove threshols optimization functionality completely?
+    ## TODO: Remove thresholds optimization functionality completely?
     ### Load data without generator (needed for threshold optimization)
     if options.train is not None and options.threshold is None:
         train_texts, train_labels = load_data(options.train, options, max_chars=25000)
@@ -747,9 +758,9 @@ def main(argv):
         print("Loading model from", options.load_model)
         classifier, tokenizer, labels, config = load_trained_model(options.load_model)
 
-    if options.train is None:
-        assert (options.load_weights is not None or options.load_model is not None) and options.train is None
-        # Evaluate only when no train data is passed
+    if options.train is None:# or options.epochs == 0:
+        assert (options.load_weights is not None or options.load_model is not None)
+        # Evaluate only when no train data is passed (TODO: fix this)
 
         if options.dev is not None:
             print("Evaluating on dev set...")
@@ -776,9 +787,10 @@ def main(argv):
         #f1, th, dev_pred = test_threshold(classifier, dev_X, dev_Y, threshold=0.4)
         return
 
-
+    callbacks = []
     #callbacks = [ModelCheckpoint(options.save_weights+'.{epoch:02d}', save_weights_only=True)]
-    callbacks = [ModelCheckpoint(options.save_weights+'.{epoch:02d}', save_weights_only=True, save_best_only=True, verbose=1, monitor="val_f1_th", mode="max")]
+    if options.save_weights is not None:
+        callbacks.append(ModelCheckpoint(options.save_weights, save_weights_only=True, save_best_only=True, verbose=1, monitor="val_f1_th", mode="max"))
     if options.threshold is None:
         if options.test is not None and options.test_log_file is not None:
             print("Initializing evaluation with dev and test set...")
@@ -854,7 +866,7 @@ def main(argv):
             for i, (test_X, test_Y) in enumerate(zip(test_Xs, test_Ys)):
                 test_log_file = options.test_log_file.split(';')[i]
                 print("Evaluating on test set %d..." % i)
-                test_f1, test_th, test_pred, test_rocauc = test_threshold(classifier, test_X, test_Y, threshold=options.threshold, return_auc=True)
+                test_f1, test_th, test_pred, test_rocauc = test_threshold(classifier, test_X, test_Y, threshold=options.threshold, return_auc=True, save_pred_to=options.save_predictions)
                 print("AUC test:", test_rocauc)
                 print("Logging to", test_log_file)
                 test_logger = Logger(options.test_log_file.split(';')[i], None, {'LR': options.lr, 'N_epochs': options.epochs, 'BS': options.batch_size})
